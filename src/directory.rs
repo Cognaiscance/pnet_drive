@@ -284,6 +284,17 @@ pub fn report_server(dir: &Directory) -> Option<Peer> {
     })
 }
 
+/// Own device that has this approved `drive-client` app.
+pub fn client_device(dir: &Directory, app_id: &[u8; 16]) -> Option<[u8; 16]> {
+    dir.own_devices.iter().find_map(|device| {
+        device
+            .apps
+            .iter()
+            .any(|app| app.id == *app_id && app.alias == CLIENT_ALIAS && app.approved)
+            .then_some(device.id)
+    })
+}
+
 fn client_app(device: &DeviceRecord) -> Option<&AppRecord> {
     device
         .apps

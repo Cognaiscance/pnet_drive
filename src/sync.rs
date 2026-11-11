@@ -19,6 +19,8 @@ const T_DELETE: u8 = 2;
 const T_LINK: u8 = 3;
 const T_START: u8 = 4;
 const T_CHUNK: u8 = 5;
+const T_HAVE: u8 = 6;
+const T_END: u8 = 7;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Meta {
@@ -156,16 +158,24 @@ struct Partial {
 
 pub struct Inbox {
     partial: HashMap<String, Partial>,
+    have: HashSet<String>,
 }
 
 impl Inbox {
     pub fn new() -> Self {
         Self {
             partial: HashMap::new(),
+            have: HashSet::new(),
         }
     }
 
-    pub fn apply(&mut self, store: &mut Store, packet: &[u8], now_ms: u64) -> Result<(), StoreError> {
+    /// Applies one report. A finished index returns the files and folders the client does not have.
+    pub fn apply(
+        &mut self,
+        store: &mut Store,
+        packet: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<Change>, StoreError> {
         if packet.len() < 10 || packet[0] != VER {
             return Err(StoreError::BadPath);
         }
@@ -173,15 +183,25 @@ impl Inbox {
         match packet[1] {
             T_MKDIR => {
                 let path = take_path(body)?.0;
-                store.mkdir(&path, &[0u8; 16])
+                store.mkdir(&path, &[0u8; 16])?;
+                Ok(Vec::new())
             }
             T_DELETE => {
                 let path = take_path(body)?.0;
                 match store.trash_file(&path, now_ms) {
-                    Ok(()) => Ok(()),
-                    Err(StoreError::IsAFolder) => store.remove_folder(&path),
+                    Ok(()) => Ok(Vec::new()),
+                    Err(StoreError::IsAFolder) => store.remove_folder(&path).map(|()| Vec::new()),
                     Err(err) => Err(err),
                 }
+            }
+            T_HAVE => {
+                let path = take_path(body)?.0;
+                self.have.insert(path);
+                Ok(Vec::new())
+            }
+            T_END => {
+                let have = std::mem::take(&mut self.have);
+                missing(store, &have)
             }
             T_LINK => {
                 let (path, rest) = take_path(body)?;
@@ -193,7 +213,8 @@ impl Inbox {
                 let Some(bytes) = store.read_blob(&hash) else {
                     return Err(StoreError::Missing);
                 };
-                store.put_file(&path, &bytes, &[0u8; 16]).map(|_| ())
+                store.put_file(&path, &bytes, &[0u8; 16])?;
+                Ok(Vec::new())
             }
             T_START => {
                 let (path, rest) = take_path(body)?;
@@ -211,7 +232,7 @@ impl Inbox {
                         buf: Vec::new(),
                     },
                 );
-                Ok(())
+                Ok(Vec::new())
             }
             T_CHUNK => {
                 let (path, rest) = take_path(body)?;
@@ -228,14 +249,147 @@ impl Inbox {
                 if part.buf.len() as u64 == part.size && sha256(&part.buf) == part.hash {
                     let bytes = part.buf.clone();
                     self.partial.remove(&path);
-                    store.put_file(&path, &bytes, &[0u8; 16]).map(|_| ())
+                    store.put_file(&path, &bytes, &[0u8; 16])?;
+                    Ok(Vec::new())
                 } else {
-                    Ok(())
+                    Ok(Vec::new())
                 }
             }
             _ => Err(StoreError::BadPath),
         }
     }
+}
+
+/// Files and folders the store has that `have` does not name.
+pub fn missing(store: &Store, have: &HashSet<String>) -> Result<Vec<Change>, StoreError> {
+    let mut changes = Vec::new();
+    for entry in store.entries() {
+        if have.contains(&entry.path) {
+            continue;
+        }
+        match entry.kind {
+            store::Kind::Folder => changes.push(Change::Mkdir(entry.path.clone())),
+            store::Kind::File { .. } => {
+                let bytes = store.read_file(&entry.path)?;
+                changes.push(Change::File {
+                    path: entry.path.clone(),
+                    bytes,
+                });
+            }
+        }
+    }
+    changes.sort_by_key(|change| match change {
+        Change::Mkdir(path) => (0, path.clone()),
+        Change::File { path, .. } => (1, path.clone()),
+        Change::Delete(_) => (2, String::new()),
+    });
+    Ok(changes)
+}
+
+pub fn index_packets(paths: &[String]) -> Vec<Vec<u8>> {
+    let mut packets: Vec<_> = paths
+        .iter()
+        .map(|path| packet(T_HAVE, &path_body(path)))
+        .collect();
+    packets.push(packet(T_END, &[]));
+    packets
+}
+
+pub fn write_local(root: &Path, change: &Change) -> io::Result<()> {
+    match change {
+        Change::Mkdir(path) => fs::create_dir_all(root.join(path)),
+        Change::File { path, bytes } => {
+            let full = root.join(path);
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(full, bytes)
+        }
+        Change::Delete(path) => {
+            let full = root.join(path);
+            if full.is_dir() {
+                fs::remove_dir_all(full)
+            } else {
+                match fs::remove_file(full) {
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                    other => other,
+                }
+            }
+        }
+    }
+}
+
+/// Writes server chunks into the local folder.
+pub struct Downloader {
+    partial: HashMap<String, Partial>,
+}
+
+impl Downloader {
+    pub fn new() -> Self {
+        Self {
+            partial: HashMap::new(),
+        }
+    }
+
+    /// Paths written by this packet. The caller marks them quiet.
+    pub fn apply(&mut self, root: &Path, packet: &[u8]) -> io::Result<Vec<String>> {
+        if packet.len() < 10 || packet[0] != VER {
+            return Ok(Vec::new());
+        }
+        let body = &packet[10..];
+        match packet[1] {
+            T_MKDIR => {
+                let path = take_path(body).map_err(store_io)?.0;
+                write_local(root, &Change::Mkdir(path.clone()))?;
+                Ok(vec![path])
+            }
+            T_START => {
+                let (path, rest) = take_path(body).map_err(store_io)?;
+                if rest.len() != 8 + 32 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "short start"));
+                }
+                let size = u64::from_be_bytes(rest[..8].try_into().unwrap());
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&rest[8..40]);
+                self.partial.insert(path, Partial { size, hash, buf: Vec::new() });
+                Ok(Vec::new())
+            }
+            T_CHUNK => {
+                let (path, rest) = take_path(body).map_err(store_io)?;
+                if rest.len() < 8 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "short chunk"));
+                }
+                let offset = u64::from_be_bytes(rest[..8].try_into().unwrap());
+                let part = self
+                    .partial
+                    .get_mut(&path)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk without start"))?;
+                if offset != part.buf.len() as u64 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "chunk out of order"));
+                }
+                part.buf.extend_from_slice(&rest[8..]);
+                if part.buf.len() as u64 == part.size && sha256(&part.buf) == part.hash {
+                    let bytes = part.buf.clone();
+                    self.partial.remove(&path);
+                    write_local(root, &Change::File { path: path.clone(), bytes })?;
+                    Ok(vec![path])
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+}
+
+impl Default for Downloader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn store_io(err: StoreError) -> io::Error {
+    io::Error::other(err.to_string())
 }
 
 impl Default for Inbox {
@@ -411,5 +565,42 @@ mod tests {
         Inbox::new().apply(&mut store, &packets[0], 1).unwrap();
         assert_eq!(store.read_file("notes/copy.txt").unwrap(), b"hello");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn downloads_a_server_file_without_reporting_it() {
+        let dir = scratch();
+        let mut store = Store::open(&dir).unwrap();
+        store.mkdir("notes", &[0u8; 16]).unwrap();
+        store.mkdir("notes/2026", &[0u8; 16]).unwrap();
+        store.put_file("notes/a.txt", b"hello", &[0u8; 16]).unwrap();
+        store.put_file("notes/2026/plan.txt", b"later", &[0u8; 16]).unwrap();
+
+        let root = scratch();
+        local::ensure(&root).unwrap();
+        fs::write(root.join("keep.txt"), b"mine").unwrap();
+        let have: HashSet<String> = ["keep.txt".to_string()].into_iter().collect();
+        let changes = missing(&store, &have).unwrap();
+        assert_eq!(changes.len(), 4);
+
+        let mut down = Downloader::new();
+        let mut watch = Watch::new();
+        watch.poll(&root).unwrap();
+        watch.commit();
+        for change in &changes {
+            for packet in encode(change, false) {
+                let written = down.apply(&root, &packet).unwrap();
+                for path in written {
+                    watch.quiet(&path);
+                }
+            }
+        }
+        assert_eq!(fs::read(root.join("notes/a.txt")).unwrap(), b"hello");
+        assert_eq!(fs::read(root.join("notes/2026/plan.txt")).unwrap(), b"later");
+        assert!(root.join("notes/2026").is_dir());
+        let reported = watch.poll(&root).unwrap();
+        assert!(reported.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&root);
     }
 }

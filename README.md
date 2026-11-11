@@ -6,7 +6,7 @@ pNet only carries the bytes. The two programs register as different apps and sha
 
 | Program | Where it runs | What it does |
 |---------|----------------|--------------|
-| `drive-client` | Every device that should keep a copy | Watches `~/Drive` and reports new files, changes, new folders, and deletes to the server. |
+| `drive-client` | Every device that should keep a copy | Watches `~/Drive`, reports local changes, and writes files that exist only on the server. |
 | `drive-server` | Server-grade nodes | Opens the file store and mounts `/apps/drive/`. The page lists a folder and can upload, download, create a folder, and delete a file. Deleted files stay in Trash for 2 days. |
 
 The steps are in [descriptions/action-plan.md](descriptions/action-plan.md).

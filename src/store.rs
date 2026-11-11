@@ -116,6 +116,10 @@ impl Store {
         self.entries.len()
     }
 
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
     /// Direct children of a folder. An empty `folder` is the root.
     pub fn list(&self, folder: &str) -> Result<Vec<Entry>, StoreError> {
         let prefix = if folder.is_empty() {

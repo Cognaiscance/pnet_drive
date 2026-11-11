@@ -2,13 +2,14 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use pnet_drive::directory;
 use pnet_drive::local;
 use pnet_drive::node::{self, NodeClient};
-use pnet_drive::sync::{self, Change, Watch};
+use pnet_drive::sync::{self, Change, Downloader, Watch};
 use pnet_drive::{CLIENT_ALIAS, DEFAULT_CLIENT_PUSH};
 
 fn main() {
@@ -22,7 +23,7 @@ fn main() {
         .parse()
         .unwrap_or(DEFAULT_CLIENT_PUSH);
 
-    let _push = node::bind_push(push_port).unwrap_or_else(|err| {
+    let push = node::bind_push(push_port).unwrap_or_else(|err| {
         log::error!("[drive-client] bind 127.0.0.1:{push_port}: {err}");
         std::process::exit(1);
     });
@@ -64,26 +65,31 @@ fn main() {
         }
     }
 
-    let mut watch = Watch::new();
-    if let Err(err) = watch.poll(&folder) {
-        log::error!("[drive-client] folder {}: {err}", folder.display());
-        std::process::exit(1);
+    let watch = Arc::new(Mutex::new(Watch::new()));
+    {
+        let mut watch = watch.lock().unwrap_or_else(|err| err.into_inner());
+        if let Err(err) = watch.poll(&folder) {
+            log::error!("[drive-client] folder {}: {err}", folder.display());
+            std::process::exit(1);
+        }
     }
+    let pull_watch = Arc::clone(&watch);
+    let pull_folder = folder.clone();
+    thread::spawn(move || pull_loop(push, pull_folder, pull_watch));
     let mut sent: HashSet<[u8; 32]> = HashSet::new();
 
     loop {
         thread::sleep(Duration::from_secs(2));
-        let changes = match watch.poll(&folder) {
-            Ok(changes) => changes,
-            Err(err) => {
-                log::error!("[drive-client] folder {}: {err}", folder.display());
-                continue;
+        let changes = {
+            let mut watch = watch.lock().unwrap_or_else(|err| err.into_inner());
+            match watch.poll(&folder) {
+                Ok(changes) => changes,
+                Err(err) => {
+                    log::error!("[drive-client] folder {}: {err}", folder.display());
+                    continue;
+                }
             }
         };
-        if changes.is_empty() {
-            watch.commit();
-            continue;
-        }
         let holder = match node.get_data(&token).and_then(|reply| {
             directory::parse_get_data(&reply).map_err(|_| pnet_drive::node::NodeError::Unexpected)
         }) {
@@ -97,7 +103,11 @@ fn main() {
             log::error!("[drive-client] no drive server is approved yet");
             continue;
         };
+        if changes.is_empty() {
+            watch.lock().unwrap_or_else(|err| err.into_inner()).commit();
+        }
         let mut failed = false;
+        if !changes.is_empty() {
         for change in &changes {
             let have = match change {
                 Change::File { bytes, .. } => sent.contains(&sync::content_hash(bytes)),
@@ -118,8 +128,54 @@ fn main() {
             }
             log::info!("[drive-client] reported a change");
         }
-        if !failed {
-            watch.commit();
+            if !failed {
+                watch.lock().unwrap_or_else(|err| err.into_inner()).commit();
+            }
+        }
+        if failed {
+            continue;
+        }
+        let paths = match local::list(&folder) {
+            Ok(entries) => entries.into_iter().map(|entry| entry.path).collect::<Vec<_>>(),
+            Err(err) => {
+                log::error!("[drive-client] folder {}: {err}", folder.display());
+                continue;
+            }
+        };
+        for packet in sync::index_packets(&paths) {
+            if let Err(err) = node.send(&token, &peer.device, &peer.app, &packet) {
+                log::error!("[drive-client] index: {err}");
+                break;
+            }
+        }
+    }
+}
+
+fn pull_loop(socket: std::net::UdpSocket, folder: std::path::PathBuf, watch: Arc<Mutex<Watch>>) {
+    let mut down = Downloader::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match socket.recv(&mut buf) {
+            Ok(n) => {
+                let Some(push) = node::parse_push(&buf[..n]) else {
+                    continue;
+                };
+                let mut watch = watch.lock().unwrap_or_else(|err| err.into_inner());
+                match down.apply(&folder, &push.payload) {
+                    Ok(paths) => {
+                        for path in paths {
+                            watch.quiet(&path);
+                            log::info!("[drive-client] wrote {path}");
+                        }
+                    }
+                    Err(err) => log::error!("[drive-client] download: {err}"),
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) => {
+                log::error!("[drive-client] push: {err}");
+                thread::sleep(Duration::from_millis(200));
+            }
         }
     }
 }

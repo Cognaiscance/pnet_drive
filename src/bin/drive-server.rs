@@ -38,18 +38,19 @@ fn main() {
         std::process::exit(1);
     });
     let token_path = node::token_path("drive-server");
-    match node.register(SERVER_ALIAS, push_port) {
+    let token = match node.register(SERVER_ALIAS, push_port) {
         Ok(token) => {
             if let Err(err) = node::save_token(&token_path, &token) {
                 log::error!("[drive-server] token file: {err}");
             }
             log::info!("[drive-server] registered as {SERVER_ALIAS}");
+            token
         }
         Err(err) => {
             log::error!("[drive-server] register failed: {err}");
             std::process::exit(1);
         }
-    }
+    };
 
     let dir = node::data_dir();
     let store = match Store::open(&dir) {
@@ -72,7 +73,7 @@ fn main() {
     let page_store = Arc::clone(&store);
     thread::spawn(move || http_loop(listener, page_store));
     let push_store = Arc::clone(&store);
-    thread::spawn(move || push_loop(push, push_store));
+    thread::spawn(move || push_loop(push, push_store, node, token));
 
     for attempt in 1..=5 {
         match portal_register(&portal, http_port) {
@@ -95,7 +96,12 @@ fn main() {
     }
 }
 
-fn push_loop(socket: std::net::UdpSocket, store: Arc<Mutex<Store>>) {
+fn push_loop(
+    socket: std::net::UdpSocket,
+    store: Arc<Mutex<Store>>,
+    node: pnet_drive::node::NodeClient,
+    token: [u8; 16],
+) {
     let mut inbox = Inbox::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -104,11 +110,14 @@ fn push_loop(socket: std::net::UdpSocket, store: Arc<Mutex<Store>>) {
                 let Some(push) = node::parse_push(&buf[..n]) else {
                     continue;
                 };
-                let mut guard = store.lock().unwrap_or_else(|err| err.into_inner());
-                if let Err(err) = inbox.apply(&mut guard, &push.payload, store::now_ms()) {
-                    log::error!("[drive-server] report: {err}");
-                } else {
-                    log::info!("[drive-server] applied a report from {:02x?}", &push.sender_app[..4]);
+                let reply = {
+                    let mut guard = store.lock().unwrap_or_else(|err| err.into_inner());
+                    inbox.apply(&mut guard, &push.payload, store::now_ms())
+                };
+                match reply {
+                    Ok(changes) if changes.is_empty() => {}
+                    Ok(changes) => send_missing(&node, &token, &push.sender_app, &changes),
+                    Err(err) => log::error!("[drive-server] report: {err}"),
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -118,6 +127,36 @@ fn push_loop(socket: std::net::UdpSocket, store: Arc<Mutex<Store>>) {
             }
         }
     }
+}
+
+fn send_missing(
+    node: &pnet_drive::node::NodeClient,
+    token: &[u8; 16],
+    app_id: &[u8; 16],
+    changes: &[pnet_drive::sync::Change],
+) {
+    let device = match node.get_data(token).and_then(|reply| {
+        pnet_drive::directory::parse_get_data(&reply)
+            .map_err(|_| pnet_drive::node::NodeError::Unexpected)
+    }) {
+        Ok(dir) => pnet_drive::directory::client_device(&dir, app_id),
+        Err(err) => {
+            log::error!("[drive-server] directory: {err}");
+            None
+        }
+    };
+    let Some(device) = device else {
+        log::error!("[drive-server] the report did not come from an approved drive client");
+        return;
+    };
+    for change in changes {
+        for packet in pnet_drive::sync::encode(change, false) {
+            if let Err(err) = node.send(token, &device, app_id, &packet) {
+                log::error!("[drive-server] send file: {err}");
+            }
+        }
+    }
+    log::info!("[drive-server] sent {} missing paths", changes.len());
 }
 
 fn http_loop(listener: TcpListener, store: Arc<Mutex<Store>>) {
