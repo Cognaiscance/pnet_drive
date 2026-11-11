@@ -3,6 +3,7 @@
 //! `drive-client` watches a folder on each device. `drive-server` stores the
 //! files and mounts `/apps/drive/` on the top-ranked server-grade node.
 
+pub mod local;
 pub mod log_setup;
 pub mod node;
 pub mod page;

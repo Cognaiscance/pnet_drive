@@ -1,9 +1,10 @@
-//! Registers as drive-client and waits. The local folder comes in a later step.
+//! Registers as drive-client and keeps a local folder. It does not sync yet.
 
 use std::net::SocketAddr;
 use std::thread;
 use std::time::Duration;
 
+use pnet_drive::local;
 use pnet_drive::node::{self, NodeClient};
 use pnet_drive::{CLIENT_ALIAS, DEFAULT_CLIENT_PUSH};
 
@@ -18,10 +19,10 @@ fn main() {
         .parse()
         .unwrap_or(DEFAULT_CLIENT_PUSH);
 
-    if let Err(err) = node::bind_push(push_port) {
+    let _push = node::bind_push(push_port).unwrap_or_else(|err| {
         log::error!("[drive-client] bind 127.0.0.1:{push_port}: {err}");
         std::process::exit(1);
-    }
+    });
     let node = NodeClient::connect(addr).unwrap_or_else(|err| {
         log::error!("[drive-client] local node {addr}: {err}");
         std::process::exit(1);
@@ -36,6 +37,25 @@ fn main() {
         }
         Err(err) => {
             log::error!("[drive-client] register failed: {err}");
+            std::process::exit(1);
+        }
+    }
+
+    let folder = local::folder_dir();
+    if let Err(err) = local::ensure(&folder) {
+        log::error!("[drive-client] folder {}: {err}", folder.display());
+        std::process::exit(1);
+    }
+    match local::list(&folder) {
+        Ok(entries) => {
+            log::info!(
+                "[drive-client] folder {} ({} entries)",
+                folder.display(),
+                entries.len()
+            );
+        }
+        Err(err) => {
+            log::error!("[drive-client] folder {}: {err}", folder.display());
             std::process::exit(1);
         }
     }
