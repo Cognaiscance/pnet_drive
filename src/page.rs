@@ -3,13 +3,18 @@
 //! Links are relative so they stay under `/apps/drive/` inside the portal frame.
 
 use crate::store::{self, Entry, Kind, Store, StoreError, TrashItem};
+use crate::WEB_TITLE;
 
 const WEB_WRITER: [u8; 16] = [0u8; 16];
 
 pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
     let mut body = String::from(
         "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\"><head><meta charset=\"utf-8\">\
-         <meta name=\"theme-color\" content=\"#070605\"><title>Drive</title>\n\
+         <meta name=\"theme-color\" content=\"#070605\"><title>",
+    );
+    body.push_str(WEB_TITLE);
+    body.push_str(
+        "</title>\n\
          <script>\
          (function () {\
            var theme = \"dark\";\
@@ -24,7 +29,9 @@ pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
          </script>\n<style>",
     );
     body.push_str(PAGE_CSS);
-    body.push_str("</style></head><body>\n<main>\n<h1>Drive</h1>\n");
+    body.push_str("</style></head><body>\n<main>\n<h1>");
+    body.push_str(WEB_TITLE);
+    body.push_str("</h1>\n");
     body.push_str(&crumbs(folder));
     body.push_str("<p class=\"crumbs\"><a href=\"?trash=1\">Trash</a></p>\n");
     if let Some(note) = note {
@@ -104,7 +111,7 @@ pub fn folder_query(request_line: &str) -> Result<Option<String>, ()> {
 }
 
 fn crumbs(folder: &str) -> String {
-    let mut html = String::from("<p class=\"crumbs\"><a href=\"?\">Drive</a>");
+    let mut html = format!("<p class=\"crumbs\"><a href=\"?\">{WEB_TITLE}</a>");
     if !folder.is_empty() {
         let mut built = String::new();
         for part in folder.split('/') {
@@ -266,7 +273,11 @@ fn trash_page(store: &Store, note: Option<&str>) -> Vec<u8> {
 fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
     let mut body = String::from(
         "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\"><head><meta charset=\"utf-8\">\
-         <meta name=\"theme-color\" content=\"#070605\"><title>Trash</title>\n\
+         <meta name=\"theme-color\" content=\"#070605\"><title>Trash — ",
+    );
+    body.push_str(WEB_TITLE);
+    body.push_str(
+        "</title>\n\
          <script>\
          (function () {\
            var theme = \"dark\";\
@@ -279,7 +290,9 @@ fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
          </script><style>",
     );
     body.push_str(PAGE_CSS);
-    body.push_str("</style></head><body><main>\n<h1>Trash</h1>\n<p class=\"crumbs\"><a href=\"?\">Drive</a></p>\n");
+    body.push_str("</style></head><body><main>\n<h1>Trash</h1>\n<p class=\"crumbs\"><a href=\"?\">");
+    body.push_str(WEB_TITLE);
+    body.push_str("</a></p>\n");
     if let Some(note) = note {
         body.push_str("<p class=\"note\">");
         body.push_str(&esc(note));
