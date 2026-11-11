@@ -10,7 +10,7 @@ This is this user's own devices and that user's server. Sharing a folder with an
 
 The holder is an own device running `drive-server`. A server-grade node wins over a device-grade node, then the lowest `sg_rank` (rank 0 sorts last, then the lower device id). Any other server stands by and does not open a second store. The client talks only to the holder. The holder accepts an approved `drive-client` on one of this user's own devices. A contact's client is ignored.
 
-The server store is `~/.pnet/drive/` (`DRIVE_DIR` overrides). File bytes live under `blobs/` named by content hash. The tree (names, folders, hashes, sizes, and which device last wrote each path) is a separate record. The client's folder defaults to `~/Drive` (`DRIVE_FOLDER` overrides). The client does not serve a page.
+The server store is `~/.pnet/drive/` (`DRIVE_DIR` overrides). File bytes live under `blobs/` named by content hash. The tree (names, folders, hashes, sizes, and which device last wrote each path) is a separate record. The client's folder defaults to `~/pDrive` (`DRIVE_FOLDER` overrides). The client does not serve a page.
 
 The page is loopback HTTP on `127.0.0.1:8822` (`DRIVE_HTTP_PORT`), mounted as `/apps/drive/` through `POST /api/app-web/register`. Push ports are `8820` for the client and `8821` for the server (`DRIVE_PUSH_PORT`).
 
