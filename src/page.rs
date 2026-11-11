@@ -2,7 +2,7 @@
 //!
 //! Links are relative so they stay under `/apps/drive/` inside the portal frame.
 
-use crate::store::{Entry, Kind, Store, StoreError};
+use crate::store::{self, Entry, Kind, Store, StoreError, TrashItem};
 
 const WEB_WRITER: [u8; 16] = [0u8; 16];
 
@@ -26,6 +26,7 @@ pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
     body.push_str(PAGE_CSS);
     body.push_str("</style></head><body>\n<main>\n<h1>Drive</h1>\n");
     body.push_str(&crumbs(folder));
+    body.push_str("<p class=\"crumbs\"><a href=\"?trash=1\">Trash</a></p>\n");
     if let Some(note) = note {
         body.push_str("<p class=\"note\">");
         body.push_str(&esc(note));
@@ -240,13 +241,69 @@ pub fn handle(store: &mut Store, raw: &[u8]) -> Vec<u8> {
             }
         }
         Req::Delete { path } => {
+            let _ = store.sweep(store::now_ms());
             let back = parent_folder(&path);
-            match store.remove_file(&path) {
+            match store.trash_file(&path, store::now_ms()) {
                 Ok(()) => redirect(&back),
                 Err(err) => list_page(store, &back, Some(&err.to_string())),
             }
         }
+        Req::Trash => trash_page(store, None),
+        Req::Restore { path } => {
+            let _ = store.sweep(store::now_ms());
+            match store.restore(&path) {
+                Ok(()) => redirect_trash(),
+                Err(err) => trash_page(store, Some(&err.to_string())),
+            }
+        }
     }
+}
+
+fn trash_page(store: &Store, note: Option<&str>) -> Vec<u8> {
+    http_response(200, "OK", &render_trash(store.trash(), note))
+}
+
+fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
+    let mut body = String::from(
+        "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\"><head><meta charset=\"utf-8\">\
+         <meta name=\"theme-color\" content=\"#070605\"><title>Trash</title>\n\
+         <script>\
+         (function () {\
+           var theme = \"dark\";\
+           try {\
+             var saved = localStorage.getItem(\"pnet-theme\");\
+             if (saved === \"light\" || saved === \"dark\") theme = saved;\
+           } catch (e) {}\
+           document.documentElement.setAttribute(\"data-theme\", theme);\
+         })();\
+         </script><style>",
+    );
+    body.push_str(PAGE_CSS);
+    body.push_str("</style></head><body><main>\n<h1>Trash</h1>\n<p class=\"crumbs\"><a href=\"?\">Drive</a></p>\n");
+    if let Some(note) = note {
+        body.push_str("<p class=\"note\">");
+        body.push_str(&esc(note));
+        body.push_str("</p>\n");
+    }
+    if items.is_empty() {
+        body.push_str("<p class=\"empty\">Trash is empty.</p>\n");
+    } else {
+        body.push_str("<ul class=\"files\">\n");
+        for item in items {
+            body.push_str("<li>");
+            body.push_str(&esc(&item.path));
+            body.push_str("<form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"restore\"><input type=\"hidden\" name=\"path\" value=\"");
+            body.push_str(&esc(&item.path));
+            body.push_str("\"><button type=\"submit\">Restore</button></form></li>\n");
+        }
+        body.push_str("</ul>\n");
+    }
+    body.push_str("<p class=\"empty\">Deleted files stay here for 2 days.</p>\n</main></body></html>\n");
+    body
+}
+
+fn redirect_trash() -> Vec<u8> {
+    b"HTTP/1.1 303 See Other\r\nLocation: ?trash=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
 }
 
 fn list_page(store: &Store, folder: &str, note: Option<&str>) -> Vec<u8> {
@@ -292,10 +349,12 @@ fn file_response(path: &str, bytes: &[u8]) -> Vec<u8> {
 
 enum Req {
     List { folder: String },
+    Trash,
     Download { path: String },
     Mkdir { folder: String, name: String },
     Upload { folder: String, name: String, bytes: Vec<u8> },
     Delete { path: String },
+    Restore { path: String },
 }
 
 fn parse_request(raw: &[u8]) -> Option<Req> {
@@ -317,6 +376,7 @@ fn parse_request(raw: &[u8]) -> Option<Req> {
     }
     let body = &body[..expect];
     match (method, path) {
+        ("GET", "/") if query_value(query, "trash").as_deref() == Some("1") => Some(Req::Trash),
         ("GET", "/") => Some(Req::List {
             folder: query_value(query, "path").unwrap_or_default(),
         }),
@@ -360,6 +420,9 @@ fn parse_post(content_type: &str, body: &[u8]) -> Option<Req> {
             name: form_value(text, "name")?,
         }),
         "delete" => Some(Req::Delete {
+            path: form_value(text, "path")?,
+        }),
+        "restore" => Some(Req::Restore {
             path: form_value(text, "path")?,
         }),
         _ => None,
@@ -517,6 +580,7 @@ mod tests {
         assert!(html.contains("New folder"));
         assert!(html.contains("Upload"));
         assert!(html.contains("Delete"));
+        assert!(html.contains("Trash"));
         assert!(!html.contains("plan.txt"));
     }
 
@@ -571,6 +635,20 @@ mod tests {
         );
         assert!(std::str::from_utf8(&removed).unwrap().contains("Location: ?path=notes"));
         assert!(store.get("notes/a.txt").unwrap().is_none());
+        assert_eq!(store.trash()[0].path, "notes/a.txt");
+
+        let listed = handle(&mut store, b"GET /?trash=1 HTTP/1.1\r\n\r\n");
+        let listed = String::from_utf8_lossy(&listed);
+        assert!(listed.contains("notes/a.txt"));
+        assert!(listed.contains("Restore"));
+
+        let restored = handle(
+            &mut store,
+            b"POST / HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 33\r\n\r\naction=restore&path=notes%2Fa.txt",
+        );
+        assert!(std::str::from_utf8(&restored).unwrap().contains("Location: ?trash=1"));
+        assert_eq!(store.read_file("notes/a.txt").unwrap(), body);
+        assert!(store.trash().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

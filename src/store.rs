@@ -39,6 +39,7 @@ pub enum StoreError {
     Missing,
     NotAFolder,
     IsAFolder,
+    Taken,
 }
 
 impl std::fmt::Display for StoreError {
@@ -50,6 +51,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Missing => f.write_str("that folder is not in the drive"),
             StoreError::NotAFolder => f.write_str("parent is not a folder"),
             StoreError::IsAFolder => f.write_str("that path is a folder"),
+            StoreError::Taken => f.write_str("that path is already in the drive"),
         }
     }
 }
@@ -60,9 +62,22 @@ impl From<io::Error> for StoreError {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrashItem {
+    pub path: String,
+    pub hash: [u8; 32],
+    pub size: u64,
+    pub writer: [u8; 16],
+    pub deleted_ms: u64,
+}
+
+/// How long a deleted file stays restorable.
+pub const TRASH_KEEP_MS: u64 = 48 * 60 * 60 * 1000;
+
 pub struct Store {
     dir: PathBuf,
     entries: Vec<Entry>,
+    trash: Vec<TrashItem>,
 }
 
 impl Store {
@@ -78,10 +93,23 @@ impl Store {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(err) => return Err(err),
         };
-        Ok(Self {
+        let trash_path = dir.join("trash");
+        let trash = match fs::read_to_string(&trash_path) {
+            Ok(text) => parse_trash(&text).map_err(|err| {
+                io::Error::new(io::ErrorKind::InvalidData, err)
+            })?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(err) => return Err(err),
+        };
+        let mut store = Self {
             dir: dir.to_path_buf(),
             entries,
-        })
+            trash,
+        };
+        store
+            .sweep(now_ms())
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        Ok(store)
     }
 
     pub fn len(&self) -> usize {
@@ -166,6 +194,88 @@ impl Store {
         }
         self.write_tree()?;
         Ok(hash)
+    }
+
+    pub fn trash(&self) -> &[TrashItem] {
+        &self.trash
+    }
+
+    pub fn trash_file(&mut self, path: &str, now_ms: u64) -> Result<(), StoreError> {
+        let path = check_path(path)?;
+        let Some(index) = self.entries.iter().position(|entry| entry.path == path) else {
+            return Err(StoreError::Missing);
+        };
+        let Kind::File { hash, size } = self.entries[index].kind else {
+            return Err(StoreError::IsAFolder);
+        };
+        let writer = self.entries[index].writer;
+        self.entries.remove(index);
+        self.trash.push(TrashItem {
+            path,
+            hash,
+            size,
+            writer,
+            deleted_ms: now_ms,
+        });
+        self.write_tree()?;
+        self.write_trash()
+    }
+
+    pub fn restore(&mut self, path: &str) -> Result<(), StoreError> {
+        let path = check_path(path)?;
+        let Some(index) = self
+            .trash
+            .iter()
+            .rposition(|item| item.path == path)
+        else {
+            return Err(StoreError::Missing);
+        };
+        if self.entries.iter().any(|entry| entry.path == path) {
+            return Err(StoreError::Taken);
+        }
+        self.require_parent(&path)?;
+        let item = self.trash.remove(index);
+        self.entries.push(Entry {
+            path: item.path,
+            kind: Kind::File {
+                hash: item.hash,
+                size: item.size,
+            },
+            writer: item.writer,
+        });
+        self.entries.sort_by(|a, b| a.path.cmp(&b.path));
+        self.write_tree()?;
+        self.write_trash()
+    }
+
+    pub fn sweep(&mut self, now_ms: u64) -> Result<(), StoreError> {
+        let mut kept = Vec::new();
+        let mut expired = Vec::new();
+        for item in self.trash.drain(..) {
+            if now_ms.saturating_sub(item.deleted_ms) >= TRASH_KEEP_MS {
+                expired.push(item);
+            } else {
+                kept.push(item);
+            }
+        }
+        for item in &expired {
+            let live = self.entries.iter().any(|entry| {
+                matches!(entry.kind, Kind::File { hash: other, .. } if other == item.hash)
+            });
+            let still = kept.iter().any(|other| other.hash == item.hash);
+            if !live && !still {
+                let blob = self.blob_path(&item.hash);
+                if blob.exists() {
+                    fs::remove_file(blob)?;
+                }
+            }
+        }
+        let changed = !expired.is_empty();
+        self.trash = kept;
+        if changed {
+            self.write_trash()?;
+        }
+        Ok(())
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<(), StoreError> {
@@ -275,6 +385,37 @@ impl Store {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         Ok(())
     }
+
+    fn write_trash(&self) -> Result<(), StoreError> {
+        let mut body = String::from("TRASH1\n");
+        for item in &self.trash {
+            body.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                item.path,
+                hex(&item.hash),
+                item.size,
+                hex(&item.writer),
+                item.deleted_ms
+            ));
+        }
+        let path = self.dir.join("trash");
+        let tmp = self.dir.join("trash.tmp");
+        {
+            let mut file = File::create(&tmp)?;
+            file.write_all(body.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp, &path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|dur| dur.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// A relative UTF-8 path that uses `/` and has no `.` or `..` segment.
@@ -351,6 +492,48 @@ fn from_hex(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         _ => None,
     }
+}
+
+fn parse_trash(text: &str) -> Result<Vec<TrashItem>, String> {
+    let mut lines = text.lines();
+    let Some(magic) = lines.next() else {
+        return Ok(Vec::new());
+    };
+    if magic != "TRASH1" {
+        return Err("trash record is not TRASH1".into());
+    }
+    let mut items = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let path = parts.next().ok_or("short trash line")?;
+        check_path(path).map_err(|_| "trash path is not a drive path".to_string())?;
+        let hash = parse_hex(parts.next().ok_or("short trash line")?).ok_or("bad hash")?;
+        let size = parts
+            .next()
+            .ok_or("short trash line")?
+            .parse()
+            .map_err(|_| "bad size")?;
+        let writer = parse_hex(parts.next().ok_or("short trash line")?).ok_or("bad writer")?;
+        let deleted_ms = parts
+            .next()
+            .ok_or("short trash line")?
+            .parse()
+            .map_err(|_| "bad time")?;
+        if parts.next().is_some() {
+            return Err("extra trash fields".into());
+        }
+        items.push(TrashItem {
+            path: path.to_string(),
+            hash,
+            size,
+            writer,
+            deleted_ms,
+        });
+    }
+    Ok(items)
 }
 
 fn parse_tree(text: &str) -> Result<Vec<Entry>, String> {
@@ -539,6 +722,47 @@ mod tests {
         assert_eq!(store.read_file("notes/b.txt").unwrap(), b"hello");
         store.remove_file("notes/b.txt").unwrap();
         assert!(store.read_file("notes/b.txt").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trash_restores_and_expires() {
+        let dir = scratch();
+        let mut store = Store::open(&dir).unwrap();
+        let writer = [4u8; 16];
+        store.mkdir("notes", &writer).unwrap();
+        store.put_file("notes/a.txt", b"hello", &writer).unwrap();
+        store.put_file("notes/copy.txt", b"hello", &writer).unwrap();
+        let when = 1_000_000;
+        store.trash_file("notes/a.txt", when).unwrap();
+        assert!(store.get("notes/a.txt").unwrap().is_none());
+        assert_eq!(store.trash().len(), 1);
+        assert_eq!(store.trash()[0].path, "notes/a.txt");
+        assert_eq!(store.read_file("notes/copy.txt").unwrap(), b"hello");
+
+        store.put_file("notes/a.txt", b"other", &writer).unwrap();
+        assert!(matches!(
+            store.restore("notes/a.txt"),
+            Err(StoreError::Taken)
+        ));
+        assert_eq!(store.trash().len(), 1);
+        store.remove_file("notes/a.txt").unwrap();
+        store.restore("notes/a.txt").unwrap();
+        assert_eq!(store.read_file("notes/a.txt").unwrap(), b"hello");
+        assert!(store.trash().is_empty());
+
+        store.trash_file("notes/a.txt", when).unwrap();
+        store
+            .sweep(when + TRASH_KEEP_MS - 1)
+            .unwrap();
+        assert_eq!(store.trash().len(), 1);
+        store.sweep(when + TRASH_KEEP_MS).unwrap();
+        assert!(store.trash().is_empty());
+        assert_eq!(store.read_file("notes/copy.txt").unwrap(), b"hello");
+
+        let again = Store::open(&dir).unwrap();
+        assert!(again.trash().is_empty());
+        assert_eq!(again.read_file("notes/copy.txt").unwrap(), b"hello");
         let _ = fs::remove_dir_all(&dir);
     }
 }
