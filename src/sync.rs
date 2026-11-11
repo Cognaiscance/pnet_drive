@@ -260,8 +260,13 @@ impl Inbox {
     }
 }
 
-/// Files and folders the store has that `have` does not name.
+/// Brings a client in line with the live tree.
+///
+/// Paths the store has and the client does not are created. A path the client
+/// still has that is in trash is deleted. A local file the server has never stored is left alone.
 pub fn missing(store: &Store, have: &HashSet<String>) -> Result<Vec<Change>, StoreError> {
+    let live: HashSet<&str> = store.entries().iter().map(|entry| entry.path.as_str()).collect();
+    let trashed: HashSet<&str> = store.trash().iter().map(|item| item.path.as_str()).collect();
     let mut changes = Vec::new();
     for entry in store.entries() {
         if have.contains(&entry.path) {
@@ -278,10 +283,22 @@ pub fn missing(store: &Store, have: &HashSet<String>) -> Result<Vec<Change>, Sto
             }
         }
     }
-    changes.sort_by_key(|change| match change {
-        Change::Mkdir(path) => (0, path.clone()),
-        Change::File { path, .. } => (1, path.clone()),
-        Change::Delete(_) => (2, String::new()),
+    let mut removed: Vec<String> = have
+        .iter()
+        .filter(|path| trashed.contains(path.as_str()) && !live.contains(path.as_str()))
+        .cloned()
+        .collect();
+    removed.sort_by(|a, b| b.len().cmp(&a.len()).then(b.cmp(a)));
+    for path in removed {
+        changes.push(Change::Delete(path));
+    }
+    changes.sort_by(|a, b| {
+        let key = |change: &Change| match change {
+            Change::Mkdir(path) => (0, path.len(), path.clone()),
+            Change::File { path, .. } => (1, path.len(), path.clone()),
+            Change::Delete(path) => (2, usize::MAX - path.len(), path.clone()),
+        };
+        key(a).cmp(&key(b))
     });
     Ok(changes)
 }
@@ -341,6 +358,11 @@ impl Downloader {
             T_MKDIR => {
                 let path = take_path(body).map_err(store_io)?.0;
                 write_local(root, &Change::Mkdir(path.clone()))?;
+                Ok(vec![path])
+            }
+            T_DELETE => {
+                let path = take_path(body).map_err(store_io)?.0;
+                write_local(root, &Change::Delete(path.clone()))?;
                 Ok(vec![path])
             }
             T_START => {
@@ -602,5 +624,70 @@ mod tests {
         assert!(reported.is_empty());
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_clients_follow_add_delete_and_restore() {
+        let dir = scratch();
+        let mut store = Store::open(&dir).unwrap();
+        let root_a = scratch();
+        let root_b = scratch();
+        local::ensure(&root_a).unwrap();
+        local::ensure(&root_b).unwrap();
+        let mut watch_a = Watch::new();
+        let mut watch_b = Watch::new();
+        watch_a.poll(&root_a).unwrap();
+        watch_a.commit();
+        watch_b.poll(&root_b).unwrap();
+        watch_b.commit();
+        let mut down_b = Downloader::new();
+
+        fs::create_dir(root_a.join("notes")).unwrap();
+        fs::write(root_a.join("notes/a.txt"), b"hello").unwrap();
+        let added = watch_a.poll(&root_a).unwrap();
+        watch_a.commit();
+        deliver(&mut store, &added);
+        pull(&store, &root_b, &mut watch_b, &mut down_b);
+        assert_eq!(fs::read(root_b.join("notes/a.txt")).unwrap(), b"hello");
+        assert!(watch_b.poll(&root_b).unwrap().is_empty());
+        watch_b.commit();
+
+        fs::remove_file(root_a.join("notes/a.txt")).unwrap();
+        let deleted = watch_a.poll(&root_a).unwrap();
+        watch_a.commit();
+        deliver(&mut store, &deleted);
+        assert_eq!(store.trash()[0].path, "notes/a.txt");
+        pull(&store, &root_b, &mut watch_b, &mut down_b);
+        assert!(!root_b.join("notes/a.txt").exists());
+        assert!(watch_b.poll(&root_b).unwrap().is_empty());
+        watch_b.commit();
+
+        store.restore("notes/a.txt").unwrap();
+        let mut down_a = Downloader::new();
+        pull(&store, &root_a, &mut watch_a, &mut down_a);
+        pull(&store, &root_b, &mut watch_b, &mut down_b);
+        assert_eq!(fs::read(root_a.join("notes/a.txt")).unwrap(), b"hello");
+        assert_eq!(fs::read(root_b.join("notes/a.txt")).unwrap(), b"hello");
+        assert!(watch_a.poll(&root_a).unwrap().is_empty());
+        assert!(watch_b.poll(&root_b).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&root_a);
+        let _ = fs::remove_dir_all(&root_b);
+    }
+
+    fn pull(store: &Store, root: &Path, watch: &mut Watch, down: &mut Downloader) {
+        let have = local::list(root)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        for change in missing(store, &have).unwrap() {
+            for packet in encode(&change, false) {
+                for path in down.apply(root, &packet).unwrap() {
+                    watch.quiet(&path);
+                }
+            }
+        }
     }
 }
