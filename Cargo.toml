@@ -7,6 +7,7 @@ description = "A file drive over pNet. Clients keep a local folder. The server s
 [dependencies]
 log = "0.4"
 flexi_logger = "0.31"
+sha2 = "0.10"
 
 [lib]
 name = "pnet_drive"

@@ -1,10 +1,11 @@
-//! Registers as drive-server and waits. The file store and the page come later.
+//! Registers as drive-server and opens the file store. The page comes later.
 
 use std::net::SocketAddr;
 use std::thread;
 use std::time::Duration;
 
 use pnet_drive::node::{self, NodeClient};
+use pnet_drive::store::Store;
 use pnet_drive::{DEFAULT_SERVER_PUSH, SERVER_ALIAS};
 
 fn main() {
@@ -39,6 +40,20 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    let dir = node::data_dir();
+    let store = match Store::open(&dir) {
+        Ok(store) => store,
+        Err(err) => {
+            log::error!("[drive-server] store {}: {err}", dir.display());
+            std::process::exit(1);
+        }
+    };
+    log::info!(
+        "[drive-server] store {} ({} entries)",
+        dir.display(),
+        store.len()
+    );
 
     loop {
         thread::sleep(Duration::from_secs(60));

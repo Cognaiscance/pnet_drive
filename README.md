@@ -7,7 +7,7 @@ pNet only carries the bytes. The two programs register as different apps and sha
 | Program | Where it runs | What it does |
 |---------|----------------|--------------|
 | `drive-client` | Every device that should keep a copy | Watches a local folder and syncs it with the server. Not built yet. Today it only registers. |
-| `drive-server` | Server-grade nodes | The top-ranked server stores the files and mounts `/apps/drive/`. Not built yet. Today it only registers. |
+| `drive-server` | Server-grade nodes | Opens the file store at `~/.pnet/drive/`. The page is not built yet. |
 
 The steps are in [descriptions/action-plan.md](descriptions/action-plan.md).
 
@@ -26,7 +26,8 @@ cargo run --bin drive-client
 |----------|---------|---------|
 | `PNET_ADDR` | `127.0.0.1:7777` | Local pNet node |
 | `DRIVE_PUSH_PORT` | `8820` client, `8821` server | Loopback port where this process receives app pushes |
-| `DRIVE_TOKEN_FILE` | `~/.pnet/drive-client/token` or `drive-server` | Saved app token. Set this when both programs run on one machine if the defaults collide. They do not: each alias has its own directory. |
+| `DRIVE_TOKEN_FILE` | `~/.pnet/drive-client/token` or `drive-server` | Saved app token. Each alias has its own directory. |
+| `DRIVE_DIR` | `~/.pnet/drive` | Server store. The tree is `tree`. File bytes are `blobs/` named by SHA-256. |
 
 ## Check
 

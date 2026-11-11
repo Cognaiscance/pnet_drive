@@ -5,6 +5,7 @@
 
 pub mod log_setup;
 pub mod node;
+pub mod store;
 
 pub const CLIENT_ALIAS: &str = "drive-client";
 pub const SERVER_ALIAS: &str = "drive-server";

@@ -32,6 +32,20 @@ impl std::fmt::Display for NodeError {
     }
 }
 
+pub fn data_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("DRIVE_DIR") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".pnet/drive");
+        }
+    }
+    PathBuf::from(".pnet/drive")
+}
+
 pub fn token_path(dir_name: &str) -> PathBuf {
     if let Ok(path) = std::env::var("DRIVE_TOKEN_FILE") {
         if !path.is_empty() {
