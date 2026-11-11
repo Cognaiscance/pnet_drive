@@ -36,6 +36,7 @@ pub enum StoreError {
     Io(io::Error),
     BadPath,
     MissingParent,
+    Missing,
     NotAFolder,
     IsAFolder,
 }
@@ -46,6 +47,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Io(err) => write!(f, "{err}"),
             StoreError::BadPath => f.write_str("path is not a relative drive path"),
             StoreError::MissingParent => f.write_str("parent folder does not exist"),
+            StoreError::Missing => f.write_str("that folder is not in the drive"),
             StoreError::NotAFolder => f.write_str("parent is not a folder"),
             StoreError::IsAFolder => f.write_str("that path is a folder"),
         }
@@ -84,6 +86,32 @@ impl Store {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Direct children of a folder. An empty `folder` is the root.
+    pub fn list(&self, folder: &str) -> Result<Vec<Entry>, StoreError> {
+        let prefix = if folder.is_empty() {
+            String::new()
+        } else {
+            let path = check_path(folder)?;
+            match self.entries.iter().find(|entry| entry.path == path) {
+                Some(entry) if matches!(entry.kind, Kind::Folder) => path,
+                Some(_) => return Err(StoreError::NotAFolder),
+                None => return Err(StoreError::Missing),
+            }
+        };
+        let mut children: Vec<Entry> = self
+            .entries
+            .iter()
+            .filter(|entry| is_child(&prefix, &entry.path))
+            .cloned()
+            .collect();
+        children.sort_by(|a, b| {
+            let af = matches!(a.kind, Kind::Folder);
+            let bf = matches!(b.kind, Kind::Folder);
+            bf.cmp(&af).then_with(|| a.name().cmp(b.name()))
+        });
+        Ok(children)
     }
 
     pub fn get(&self, path: &str) -> Result<Option<&Entry>, StoreError> {
@@ -248,6 +276,21 @@ pub fn check_path(path: &str) -> Result<String, StoreError> {
         parts.push(part);
     }
     Ok(parts.join("/"))
+}
+
+fn is_child(folder: &str, path: &str) -> bool {
+    let rest = if folder.is_empty() {
+        path
+    } else {
+        let Some(rest) = path.strip_prefix(folder) else {
+            return false;
+        };
+        let Some(rest) = rest.strip_prefix('/') else {
+            return false;
+        };
+        rest
+    };
+    !rest.is_empty() && !rest.contains('/')
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -425,6 +468,40 @@ mod tests {
             Err(StoreError::BadPath)
         ));
         assert_eq!(store.len(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_shows_one_folder() {
+        let dir = scratch();
+        let mut store = Store::open(&dir).unwrap();
+        let writer = [2u8; 16];
+        assert!(store.list("").unwrap().is_empty());
+        store.mkdir("notes", &writer).unwrap();
+        store.put_file("notes/a.txt", b"hello", &writer).unwrap();
+        store.mkdir("notes/2026", &writer).unwrap();
+        store
+            .put_file("notes/2026/plan.txt", b"later", &writer)
+            .unwrap();
+        store.mkdir("photos", &writer).unwrap();
+
+        let root: Vec<_> = store
+            .list("")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name().to_string())
+            .collect();
+        assert_eq!(root, ["notes", "photos"]);
+
+        let notes: Vec<_> = store
+            .list("notes")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name().to_string())
+            .collect();
+        assert_eq!(notes, ["2026", "a.txt"]);
+        assert!(matches!(store.list("missing"), Err(StoreError::Missing)));
+        assert!(matches!(store.list("notes/a.txt"), Err(StoreError::NotAFolder)));
         let _ = fs::remove_dir_all(&dir);
     }
 }

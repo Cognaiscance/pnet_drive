@@ -7,13 +7,13 @@ pNet only carries the bytes. The two programs register as different apps and sha
 | Program | Where it runs | What it does |
 |---------|----------------|--------------|
 | `drive-client` | Every device that should keep a copy | Watches a local folder and syncs it with the server. Not built yet. Today it only registers. |
-| `drive-server` | Server-grade nodes | Opens the file store at `~/.pnet/drive/`. The page is not built yet. |
+| `drive-server` | Server-grade nodes | Opens the file store and mounts `/apps/drive/`. The page lists one folder. |
 
 The steps are in [descriptions/action-plan.md](descriptions/action-plan.md).
 
 ## Run
 
-A local pNet node must already be listening. Approve both apps on the portal after the first start.
+A local pNet node must already be listening. Approve both apps on the portal after the first start. Sign in and open **Drive** (`/apps/drive/`).
 
 ```bash
 cargo run --bin drive-server
@@ -25,6 +25,8 @@ cargo run --bin drive-client
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `PNET_ADDR` | `127.0.0.1:7777` | Local pNet node |
+| `PNET_PORTAL` | `http://127.0.0.1:8777` | Portal, used by the server to register the page |
+| `DRIVE_HTTP_PORT` | `8822` | Loopback page on the server |
 | `DRIVE_PUSH_PORT` | `8820` client, `8821` server | Loopback port where this process receives app pushes |
 | `DRIVE_TOKEN_FILE` | `~/.pnet/drive-client/token` or `drive-server` | Saved app token. Each alias has its own directory. |
 | `DRIVE_DIR` | `~/.pnet/drive` | Server store. The tree is `tree`. File bytes are `blobs/` named by SHA-256. |
