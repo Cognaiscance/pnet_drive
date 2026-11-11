@@ -278,6 +278,31 @@ impl Store {
         Ok(())
     }
 
+    pub fn remove_folder(&mut self, path: &str) -> Result<(), StoreError> {
+        let path = check_path(path)?;
+        let Some(index) = self.entries.iter().position(|entry| entry.path == path) else {
+            return Err(StoreError::Missing);
+        };
+        if !matches!(self.entries[index].kind, Kind::Folder) {
+            return Err(StoreError::NotAFolder);
+        }
+        let prefix = format!("{path}/");
+        if self.entries.iter().any(|entry| entry.path.starts_with(&prefix)) {
+            return Err(StoreError::NotAFolder);
+        }
+        self.entries.remove(index);
+        self.write_tree()
+    }
+
+    pub fn read_blob(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+        let path = self.blob_path(hash);
+        let bytes = fs::read(&path).ok()?;
+        if sha256(&bytes) != *hash {
+            return None;
+        }
+        Some(bytes)
+    }
+
     pub fn remove_file(&mut self, path: &str) -> Result<(), StoreError> {
         let path = check_path(path)?;
         let Some(index) = self.entries.iter().position(|entry| entry.path == path) else {

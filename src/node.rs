@@ -1,7 +1,8 @@
 //! Register this process with the local pNet node.
 //!
-//! Inbound app payloads will arrive on the push port. This module only
-//! registers and stores the token. Later steps send and receive payloads.
+//! Register, get-data, and send against the local pNet node.
+//!
+//! Inbound app payloads arrive on the push port.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -13,12 +14,16 @@ use std::time::Duration;
 use crate::APP_PROTOCOL;
 
 const OP_REGISTER: u8 = 0x00;
+const OP_GET_DATA: u8 = 0x02;
+const OP_SEND: u8 = 0x03;
+const OP_PUSH: u8 = 0x04;
 const STATUS_OK: u8 = 0x00;
 
 #[derive(Debug)]
 pub enum NodeError {
     Timeout,
     Io(io::Error),
+    Rejected { code: Option<u8> },
     Unexpected,
 }
 
@@ -27,6 +32,10 @@ impl std::fmt::Display for NodeError {
         match self {
             NodeError::Timeout => f.write_str("no reply from the local node"),
             NodeError::Io(err) => write!(f, "{err}"),
+            NodeError::Rejected { code: Some(code) } => {
+                write!(f, "node rejected the request ({code:#04x})")
+            }
+            NodeError::Rejected { code: None } => f.write_str("node rejected the request"),
             NodeError::Unexpected => f.write_str("unexpected reply from the local node"),
         }
     }
@@ -97,6 +106,23 @@ pub fn load_token(path: &Path) -> io::Result<Option<[u8; 16]>> {
     }
 }
 
+pub struct Push {
+    pub sender_app: [u8; 16],
+    pub payload: Vec<u8>,
+}
+
+pub fn parse_push(buf: &[u8]) -> Option<Push> {
+    if buf.len() < 17 || buf[0] != OP_PUSH {
+        return None;
+    }
+    let mut sender_app = [0u8; 16];
+    sender_app.copy_from_slice(&buf[1..17]);
+    Some(Push {
+        sender_app,
+        payload: buf[17..].to_vec(),
+    })
+}
+
 pub fn bind_push(port: u16) -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind(("127.0.0.1", port))?;
     socket.set_read_timeout(Some(Duration::from_millis(200)))?;
@@ -135,9 +161,46 @@ impl NodeClient {
         Ok(token)
     }
 
+    pub fn get_data(&self, token: &[u8; 16]) -> Result<Vec<u8>, NodeError> {
+        let mut buf = vec![OP_GET_DATA];
+        buf.extend_from_slice(token);
+        self.round_trip(&buf)
+    }
+
+    pub fn send(
+        &self,
+        token: &[u8; 16],
+        dest_device: &[u8; 16],
+        dest_app: &[u8; 16],
+        payload: &[u8],
+    ) -> Result<(), NodeError> {
+        let mut buf = Vec::with_capacity(1 + 48 + payload.len());
+        buf.push(OP_SEND);
+        buf.extend_from_slice(token);
+        buf.extend_from_slice(dest_device);
+        buf.extend_from_slice(dest_app);
+        buf.extend_from_slice(payload);
+        self.socket.send(&buf).map_err(NodeError::Io)?;
+        let mut reply = [0u8; 64];
+        match self.socket.recv(&mut reply) {
+            Ok(n) if n > 0 && reply[0] == 0x00 => Ok(()),
+            Ok(n) if n > 0 && reply[0] == 0x01 => Err(NodeError::Rejected {
+                code: reply.get(1).copied(),
+            }),
+            Ok(_) => Err(NodeError::Unexpected),
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(NodeError::Io(err)),
+        }
+    }
+
     fn round_trip(&self, packet: &[u8]) -> Result<Vec<u8>, NodeError> {
         self.socket.send(packet).map_err(NodeError::Io)?;
-        let mut reply = [0u8; 2048];
+        let mut reply = vec![0u8; 65536];
         match self.socket.recv(&mut reply) {
             Ok(0) => Err(NodeError::Unexpected),
             Ok(n) => Ok(reply[..n].to_vec()),

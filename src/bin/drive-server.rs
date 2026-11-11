@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use pnet_drive::node::{self, NodeClient};
 use pnet_drive::page;
-use pnet_drive::store::Store;
+use pnet_drive::store::{self, Store};
+use pnet_drive::sync::Inbox;
 use pnet_drive::{
     DEFAULT_HTTP_PORT, DEFAULT_SERVER_PUSH, SERVER_ALIAS, WEB_SLUG, WEB_TITLE,
 };
@@ -28,7 +29,7 @@ fn main() {
         .unwrap_or(DEFAULT_HTTP_PORT);
     let portal = env_or("PNET_PORTAL", "http://127.0.0.1:8777");
 
-    let _push = node::bind_push(push_port).unwrap_or_else(|err| {
+    let push = node::bind_push(push_port).unwrap_or_else(|err| {
         log::error!("[drive-server] bind 127.0.0.1:{push_port}: {err}");
         std::process::exit(1);
     });
@@ -70,6 +71,8 @@ fn main() {
     listener.set_nonblocking(true).ok();
     let page_store = Arc::clone(&store);
     thread::spawn(move || http_loop(listener, page_store));
+    let push_store = Arc::clone(&store);
+    thread::spawn(move || push_loop(push, push_store));
 
     for attempt in 1..=5 {
         match portal_register(&portal, http_port) {
@@ -89,6 +92,31 @@ fn main() {
 
     loop {
         thread::sleep(Duration::from_secs(60));
+    }
+}
+
+fn push_loop(socket: std::net::UdpSocket, store: Arc<Mutex<Store>>) {
+    let mut inbox = Inbox::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match socket.recv(&mut buf) {
+            Ok(n) => {
+                let Some(push) = node::parse_push(&buf[..n]) else {
+                    continue;
+                };
+                let mut guard = store.lock().unwrap_or_else(|err| err.into_inner());
+                if let Err(err) = inbox.apply(&mut guard, &push.payload, store::now_ms()) {
+                    log::error!("[drive-server] report: {err}");
+                } else {
+                    log::info!("[drive-server] applied a report from {:02x?}", &push.sender_app[..4]);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) => {
+                log::error!("[drive-server] push: {err}");
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
     }
 }
 
