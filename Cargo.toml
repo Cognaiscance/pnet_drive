@@ -1,0 +1,21 @@
+[package]
+name = "pnet_drive"
+version = "0.1.0"
+edition = "2021"
+description = "A file drive over pNet. Clients keep a local folder. The server stores the files and the web page."
+
+[dependencies]
+log = "0.4"
+flexi_logger = "0.31"
+
+[lib]
+name = "pnet_drive"
+path = "src/lib.rs"
+
+[[bin]]
+name = "drive-client"
+path = "src/bin/drive-client.rs"
+
+[[bin]]
+name = "drive-server"
+path = "src/bin/drive-server.rs"

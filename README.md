@@ -1,0 +1,35 @@
+# pnet_drive
+
+A file drive for one pNet user. The server keeps the files and the web page. Each client keeps a copy in a folder on that machine and sends changes to the server.
+
+pNet only carries the bytes. The two programs register as different apps and share the protocol `application/drive`.
+
+| Program | Where it runs | What it does |
+|---------|----------------|--------------|
+| `drive-client` | Every device that should keep a copy | Watches a local folder and syncs it with the server. Not built yet. Today it only registers. |
+| `drive-server` | Server-grade nodes | The top-ranked server stores the files and mounts `/apps/drive/`. Not built yet. Today it only registers. |
+
+The steps are in [descriptions/action-plan.md](descriptions/action-plan.md).
+
+## Run
+
+A local pNet node must already be listening. Approve both apps on the portal after the first start.
+
+```bash
+cargo run --bin drive-server
+cargo run --bin drive-client
+```
+
+## Environment
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PNET_ADDR` | `127.0.0.1:7777` | Local pNet node |
+| `DRIVE_PUSH_PORT` | `8820` client, `8821` server | Loopback port where this process receives app pushes |
+| `DRIVE_TOKEN_FILE` | `~/.pnet/drive-client/token` or `drive-server` | Saved app token. Set this when both programs run on one machine if the defaults collide. They do not: each alias has its own directory. |
+
+## Check
+
+```bash
+cargo test
+```
