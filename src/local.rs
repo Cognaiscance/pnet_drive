@@ -23,10 +23,10 @@ pub fn folder_dir() -> PathBuf {
     }
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
-            return PathBuf::from(home).join("pDrive");
+            return PathBuf::from(home).join("Drive");
         }
     }
-    PathBuf::from("pDrive")
+    PathBuf::from("Drive")
 }
 
 pub fn ensure(dir: &Path) -> io::Result<()> {
