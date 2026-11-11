@@ -7,7 +7,7 @@ pNet only carries the bytes. The two programs register as different apps and sha
 | Program | Where it runs | What it does |
 |---------|----------------|--------------|
 | `drive-client` | Every device that should keep a copy | Watches a local folder and syncs it with the server. Not built yet. Today it only registers. |
-| `drive-server` | Server-grade nodes | Opens the file store and mounts `/apps/drive/`. The page lists one folder. |
+| `drive-server` | Server-grade nodes | Opens the file store and mounts `/apps/drive/`. The page lists a folder and can upload, download, create a folder, and delete a file. |
 
 The steps are in [descriptions/action-plan.md](descriptions/action-plan.md).
 

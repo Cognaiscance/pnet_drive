@@ -7,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use pnet_drive::node::{self, NodeClient};
-use pnet_drive::page::{self, http_response};
-use pnet_drive::store::{Store, StoreError};
+use pnet_drive::page;
+use pnet_drive::store::Store;
 use pnet_drive::{
     DEFAULT_HTTP_PORT, DEFAULT_SERVER_PUSH, SERVER_ALIAS, WEB_SLUG, WEB_TITLE,
 };
@@ -116,43 +116,53 @@ fn http_loop(listener: TcpListener, store: Arc<Mutex<Store>>) {
 
 fn serve_http(mut stream: TcpStream, store: &Mutex<Store>) -> Result<(), String> {
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .ok();
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).map_err(|err| err.to_string())?;
-    if n == 0 {
+    let raw = read_request(&mut stream)?;
+    if raw.is_empty() {
         return Ok(());
     }
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let line = req.lines().next().unwrap_or("");
-    let Some(folder) = page::folder_query(line).unwrap_or(None) else {
-        let resp = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        stream.write_all(resp).ok();
-        return Ok(());
-    };
-    let listed = store
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .list(&folder);
-    let (status, reason, html) = match listed {
-        Ok(entries) => (200, "OK", page::render(&folder, &entries)),
-        Err(StoreError::BadPath | StoreError::Missing | StoreError::NotAFolder) => (
-            404,
-            "Not Found",
-            page::render(&folder, &[]).replace(
-                "This folder is empty.",
-                "That folder is not in the drive.",
-            ),
-        ),
-        Err(err) => (
-            500,
-            "Internal Server Error",
-            format!("<p>{}</p>", esc(&err.to_string())),
-        ),
-    };
-    stream
-        .write_all(&http_response(status, reason, &html))
-        .map_err(|err| err.to_string())
+    let response = page::handle(
+        &mut store.lock().unwrap_or_else(|err| err.into_inner()),
+        &raw,
+    );
+    stream.write_all(&response).map_err(|err| err.to_string())
+}
+
+fn read_request(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut tmp).map_err(|err| err.to_string())?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(split) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..split]);
+            let len = head
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    if key.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            if len > 32 * 1024 * 1024 {
+                return Err("upload is larger than 32 MiB".into());
+            }
+            if buf.len() >= split + 4 + len {
+                break;
+            }
+        }
+        if buf.len() > 32 * 1024 * 1024 + 8192 {
+            return Err("upload is larger than 32 MiB".into());
+        }
+    }
+    Ok(buf)
 }
 
 fn portal_register(portal: &str, port: u16) -> Result<(), String> {
@@ -208,12 +218,6 @@ fn form_enc(text: &str) -> String {
         }
     }
     out
-}
-
-fn esc(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 fn env_or(key: &str, default: &str) -> String {

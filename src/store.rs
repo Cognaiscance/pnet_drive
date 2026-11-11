@@ -168,6 +168,27 @@ impl Store {
         Ok(hash)
     }
 
+    pub fn remove_file(&mut self, path: &str) -> Result<(), StoreError> {
+        let path = check_path(path)?;
+        let Some(index) = self.entries.iter().position(|entry| entry.path == path) else {
+            return Err(StoreError::Missing);
+        };
+        let Kind::File { hash, .. } = self.entries[index].kind else {
+            return Err(StoreError::IsAFolder);
+        };
+        self.entries.remove(index);
+        let used = self.entries.iter().any(|entry| {
+            matches!(entry.kind, Kind::File { hash: other, .. } if other == hash)
+        });
+        if !used {
+            let blob = self.blob_path(&hash);
+            if blob.exists() {
+                fs::remove_file(blob)?;
+            }
+        }
+        self.write_tree()
+    }
+
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, StoreError> {
         let path = check_path(path)?;
         let Some(entry) = self.entries.iter().find(|entry| entry.path == path) else {
@@ -502,6 +523,22 @@ mod tests {
         assert_eq!(notes, ["2026", "a.txt"]);
         assert!(matches!(store.list("missing"), Err(StoreError::Missing)));
         assert!(matches!(store.list("notes/a.txt"), Err(StoreError::NotAFolder)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_file_drops_the_bytes() {
+        let dir = scratch();
+        let mut store = Store::open(&dir).unwrap();
+        let writer = [3u8; 16];
+        store.mkdir("notes", &writer).unwrap();
+        store.put_file("notes/a.txt", b"hello", &writer).unwrap();
+        store.put_file("notes/b.txt", b"hello", &writer).unwrap();
+        store.remove_file("notes/a.txt").unwrap();
+        assert!(store.get("notes/a.txt").unwrap().is_none());
+        assert_eq!(store.read_file("notes/b.txt").unwrap(), b"hello");
+        store.remove_file("notes/b.txt").unwrap();
+        assert!(store.read_file("notes/b.txt").is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 }

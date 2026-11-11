@@ -1,8 +1,12 @@
-//! The folder list served on loopback and mounted at `/apps/drive/`.
+//! The folder page served on loopback and mounted at `/apps/drive/`.
+//!
+//! Links are relative so they stay under `/apps/drive/` inside the portal frame.
 
-use crate::store::{Entry, Kind};
+use crate::store::{Entry, Kind, Store, StoreError};
 
-pub fn render(folder: &str, entries: &[Entry]) -> String {
+const WEB_WRITER: [u8; 16] = [0u8; 16];
+
+pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
     let mut body = String::from(
         "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\"><head><meta charset=\"utf-8\">\
          <meta name=\"theme-color\" content=\"#070605\"><title>Drive</title>\n\
@@ -22,6 +26,12 @@ pub fn render(folder: &str, entries: &[Entry]) -> String {
     body.push_str(PAGE_CSS);
     body.push_str("</style></head><body>\n<main>\n<h1>Drive</h1>\n");
     body.push_str(&crumbs(folder));
+    if let Some(note) = note {
+        body.push_str("<p class=\"note\">");
+        body.push_str(&esc(note));
+        body.push_str("</p>\n");
+    }
+    body.push_str(&forms(folder));
     if entries.is_empty() {
         body.push_str("<p class=\"empty\">This folder is empty.</p>\n");
     } else {
@@ -30,17 +40,24 @@ pub fn render(folder: &str, entries: &[Entry]) -> String {
             body.push_str("<li>");
             match entry.kind {
                 Kind::Folder => {
-                    body.push_str("<a href=\"/?path=");
+                    body.push_str("<a href=\"?path=");
                     body.push_str(&url_enc(&entry.path));
                     body.push_str("\">");
                     body.push_str(&esc(entry.name()));
                     body.push_str("</a>");
                 }
                 Kind::File { size, .. } => {
+                    body.push_str("<a href=\"file?path=");
+                    body.push_str(&url_enc(&entry.path));
+                    body.push_str("\">");
                     body.push_str(&esc(entry.name()));
+                    body.push_str("</a>");
                     body.push_str(" <span class=\"size\">");
                     body.push_str(&size.to_string());
                     body.push_str(" bytes</span>");
+                    body.push_str("<form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"delete\"><input type=\"hidden\" name=\"path\" value=\"");
+                    body.push_str(&esc(&entry.path));
+                    body.push_str("\"><button type=\"submit\">Delete</button></form>");
                 }
             }
             body.push_str("</li>\n");
@@ -86,7 +103,7 @@ pub fn folder_query(request_line: &str) -> Result<Option<String>, ()> {
 }
 
 fn crumbs(folder: &str) -> String {
-    let mut html = String::from("<p class=\"crumbs\"><a href=\"/\">Drive</a>");
+    let mut html = String::from("<p class=\"crumbs\"><a href=\"?\">Drive</a>");
     if !folder.is_empty() {
         let mut built = String::new();
         for part in folder.split('/') {
@@ -94,7 +111,7 @@ fn crumbs(folder: &str) -> String {
                 built.push('/');
             }
             built.push_str(part);
-            html.push_str(" / <a href=\"/?path=");
+            html.push_str(" / <a href=\"?path=");
             html.push_str(&url_enc(&built));
             html.push_str("\">");
             html.push_str(&esc(part));
@@ -185,10 +202,276 @@ h1 { font-family: Georgia, "Iowan Old Style", Palatino, serif; font-weight: 600;
 main { max-width: 40rem; margin: 0 auto; padding: 2rem 1.2rem 3rem; }
 a { color: var(--gold); text-decoration: none; }
 a:hover { text-decoration: underline; }
-.crumbs, .empty, .size { color: var(--muted); }
+.crumbs, .empty, .size, .note { color: var(--muted); }
+form { display: flex; gap: 0.5rem; align-items: center; margin: 0.6rem 0; }
+input, button {
+  font: inherit; color: var(--ink); background: var(--bg-elev);
+  border: 1px solid var(--line); border-radius: 8px; padding: 0.35rem 0.6rem;
+}
 ul.files { list-style: none; padding: 0; margin: 1rem 0; }
 ul.files li { padding: 0.45rem 0; border-bottom: 1px solid var(--line); }
+ul.files form { display: inline; margin-left: 0.6rem; }
 "#;
+
+pub fn handle(store: &mut Store, raw: &[u8]) -> Vec<u8> {
+    let Some(req) = parse_request(raw) else {
+        return http_response(400, "Bad Request", "<p>Bad request.</p>");
+    };
+    match req {
+        Req::List { folder } => list_page(store, &folder, None),
+        Req::Download { path } => match store.read_file(&path) {
+            Ok(bytes) => file_response(&path, &bytes),
+            Err(_) => list_page(store, "", Some("That file is not in the drive.")),
+        },
+        Req::Mkdir { folder, name } => {
+            let back = folder.clone();
+            match child_path(&folder, &name).and_then(|path| store.mkdir(&path, &WEB_WRITER)) {
+                Ok(()) => redirect(&back),
+                Err(err) => list_page(store, &back, Some(&err.to_string())),
+            }
+        }
+        Req::Upload { folder, name, bytes } => {
+            let back = folder.clone();
+            match child_path(&folder, &name)
+                .and_then(|path| store.put_file(&path, &bytes, &WEB_WRITER).map(|_| ()))
+            {
+                Ok(()) => redirect(&back),
+                Err(err) => list_page(store, &back, Some(&err.to_string())),
+            }
+        }
+        Req::Delete { path } => {
+            let back = parent_folder(&path);
+            match store.remove_file(&path) {
+                Ok(()) => redirect(&back),
+                Err(err) => list_page(store, &back, Some(&err.to_string())),
+            }
+        }
+    }
+}
+
+fn list_page(store: &Store, folder: &str, note: Option<&str>) -> Vec<u8> {
+    match store.list(folder) {
+        Ok(entries) => http_response(200, "OK", &render(folder, &entries, note)),
+        Err(StoreError::BadPath | StoreError::Missing | StoreError::NotAFolder) => http_response(
+            404,
+            "Not Found",
+            &render(folder, &[], Some("That folder is not in the drive.")),
+        ),
+        Err(err) => http_response(500, "Internal Server Error", &format!("<p>{}</p>", esc(&err.to_string()))),
+    }
+}
+
+fn forms(folder: &str) -> String {
+    let folder = esc(folder);
+    format!(
+        "<form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"mkdir\"><input type=\"hidden\" name=\"folder\" value=\"{folder}\"><input name=\"name\" required placeholder=\"Folder name\"><button type=\"submit\">New folder</button></form>\n\
+         <form method=\"post\" enctype=\"multipart/form-data\"><input type=\"hidden\" name=\"action\" value=\"upload\"><input type=\"hidden\" name=\"folder\" value=\"{folder}\"><input type=\"file\" name=\"file\" required><button type=\"submit\">Upload</button></form>\n"
+    )
+}
+
+fn redirect(folder: &str) -> Vec<u8> {
+    let loc = if folder.is_empty() {
+        "?".to_string()
+    } else {
+        format!("?path={}", url_enc(folder))
+    };
+    format!("HTTP/1.1 303 See Other\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+}
+
+fn file_response(path: &str, bytes: &[u8]) -> Vec<u8> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename*=UTF-8''{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        url_enc(name),
+        bytes.len()
+    );
+    let mut out = head.into_bytes();
+    out.extend_from_slice(bytes);
+    out
+}
+
+enum Req {
+    List { folder: String },
+    Download { path: String },
+    Mkdir { folder: String, name: String },
+    Upload { folder: String, name: String, bytes: Vec<u8> },
+    Delete { path: String },
+}
+
+fn parse_request(raw: &[u8]) -> Option<Req> {
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&raw[..split]).ok()?;
+    let body = &raw[split + 4..];
+    let mut lines = head.lines();
+    let request = lines.next()?;
+    let mut parts = request.split_whitespace();
+    let method = parts.next()?;
+    let target = parts.next()?;
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let content_type = header(head, "content-type").unwrap_or("");
+    let expect = header(head, "content-length")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    if body.len() < expect {
+        return None;
+    }
+    let body = &body[..expect];
+    match (method, path) {
+        ("GET", "/") => Some(Req::List {
+            folder: query_value(query, "path").unwrap_or_default(),
+        }),
+        ("GET", "/file") => Some(Req::Download {
+            path: query_value(query, "path")?,
+        }),
+        ("POST", "/") => parse_post(content_type, body),
+        _ => None,
+    }
+}
+
+fn parse_post(content_type: &str, body: &[u8]) -> Option<Req> {
+    if let Some(boundary) = content_type
+        .split(';')
+        .filter_map(|part| part.trim().strip_prefix("boundary="))
+        .next()
+    {
+        let fields = parse_multipart(body, boundary.trim_matches('"'))?;
+        let action = fields.iter().find(|f| f.name == "action")?.text();
+        let folder = fields
+            .iter()
+            .find(|f| f.name == "folder")
+            .map(|f| f.text())
+            .unwrap_or_default();
+        if action == "upload" {
+            let file = fields.iter().find(|f| f.name == "file")?;
+            let name = file.filename.clone()?;
+            return Some(Req::Upload {
+                folder,
+                name,
+                bytes: file.bytes.clone(),
+            });
+        }
+        return None;
+    }
+    let text = std::str::from_utf8(body).ok()?;
+    let action = form_value(text, "action")?;
+    match action.as_str() {
+        "mkdir" => Some(Req::Mkdir {
+            folder: form_value(text, "folder").unwrap_or_default(),
+            name: form_value(text, "name")?,
+        }),
+        "delete" => Some(Req::Delete {
+            path: form_value(text, "path")?,
+        }),
+        _ => None,
+    }
+}
+
+struct Field {
+    name: String,
+    filename: Option<String>,
+    bytes: Vec<u8>,
+}
+
+impl Field {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+fn parse_multipart(body: &[u8], boundary: &str) -> Option<Vec<Field>> {
+    let mark = format!("--{boundary}").into_bytes();
+    let mut fields = Vec::new();
+    let mut pos = 0;
+    while pos < body.len() {
+        let start = body[pos..].windows(mark.len()).position(|w| w == mark.as_slice())? + pos;
+        pos = start + mark.len();
+        if body.get(pos..pos + 2) == Some(b"--") {
+            break;
+        }
+        if body.get(pos..pos + 2) == Some(b"\r\n") {
+            pos += 2;
+        }
+        let head_end = body[pos..].windows(4).position(|w| w == b"\r\n\r\n")? + pos;
+        let head = std::str::from_utf8(&body[pos..head_end]).ok()?;
+        pos = head_end + 4;
+        let next = body[pos..].windows(mark.len()).position(|w| w == mark.as_slice())? + pos;
+        let mut end = next;
+        if end >= 2 && body[end - 2..end] == *b"\r\n" {
+            end -= 2;
+        }
+        let (name, filename) = disposition(head)?;
+        fields.push(Field {
+            name,
+            filename,
+            bytes: body[pos..end].to_vec(),
+        });
+        pos = next;
+    }
+    Some(fields)
+}
+
+fn disposition(head: &str) -> Option<(String, Option<String>)> {
+    let line = head.lines().find(|line| {
+        line.to_ascii_lowercase().starts_with("content-disposition:")
+    })?;
+    let mut name = None;
+    let mut filename = None;
+    for part in line.split(';').skip(1) {
+        let part = part.trim();
+        if let Some(value) = part.strip_prefix("name=") {
+            name = Some(unquote(value));
+        } else if let Some(value) = part.strip_prefix("filename=") {
+            let value = unquote(value);
+            filename = value.rsplit(['/', '\\']).next().map(str::to_string);
+        }
+    }
+    Some((name?, filename))
+}
+
+fn unquote(value: &str) -> String {
+    value.trim().trim_matches('"').to_string()
+}
+
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn query_value(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == key {
+            return Some(url_dec(v));
+        }
+    }
+    None
+}
+
+fn form_value(body: &str, key: &str) -> Option<String> {
+    query_value(body, key)
+}
+
+fn child_path(folder: &str, name: &str) -> Result<String, StoreError> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return Err(StoreError::BadPath);
+    }
+    let path = if folder.is_empty() {
+        name.to_string()
+    } else {
+        format!("{folder}/{name}")
+    };
+    crate::store::check_path(&path)
+}
+
+fn parent_folder(path: &str) -> String {
+    path.rsplit_once('/').map(|(parent, _)| parent.to_string()).unwrap_or_default()
+}
 
 #[cfg(test)]
 mod tests {
@@ -215,7 +498,7 @@ mod tests {
 
     #[test]
     fn empty_folder_is_not_an_error() {
-        let html = render("", &[]);
+        let html = render("", &[], None);
         assert!(html.contains("This folder is empty."));
         assert!(!html.to_ascii_lowercase().contains("error"));
     }
@@ -225,10 +508,15 @@ mod tests {
         let html = render(
             "notes",
             &[folder("notes/2026"), file("notes/a.txt", 5)],
+            None,
         );
         assert!(html.contains("a.txt"));
         assert!(html.contains("2026"));
-        assert!(html.contains("href=\"/?path=notes%2F2026\""));
+        assert!(html.contains("href=\"?path=notes%2F2026\""));
+        assert!(html.contains("href=\"file?path=notes%2Fa.txt\""));
+        assert!(html.contains("New folder"));
+        assert!(html.contains("Upload"));
+        assert!(html.contains("Delete"));
         assert!(!html.contains("plan.txt"));
     }
 
@@ -243,5 +531,65 @@ mod tests {
             Some("notes/2026".into())
         );
         assert_eq!(folder_query("GET /favicon.ico HTTP/1.1").unwrap(), None);
+    }
+
+    #[test]
+    fn upload_download_mkdir_and_delete() {
+        let dir = std::env::temp_dir().join(format!(
+            "pnet-drive-page-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::open(&dir).unwrap();
+
+        let mkdir = handle(
+            &mut store,
+            b"POST / HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 31\r\n\r\naction=mkdir&folder=&name=notes",
+        );
+        assert!(std::str::from_utf8(&mkdir).unwrap().starts_with("HTTP/1.1 303"));
+
+        let body = b"hello drive";
+        let upload = upload_request("notes", "a.txt", body);
+        let uploaded = handle(&mut store, &upload);
+        assert!(std::str::from_utf8(&uploaded).unwrap().starts_with("HTTP/1.1 303"));
+
+        let downloaded = handle(
+            &mut store,
+            b"GET /file?path=notes%2Fa.txt HTTP/1.1\r\n\r\n",
+        );
+        let text = String::from_utf8_lossy(&downloaded);
+        let raw = text.split("\r\n\r\n").nth(1).unwrap();
+        assert_eq!(raw.as_bytes(), body);
+
+        let removed = handle(
+            &mut store,
+            b"POST / HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 32\r\n\r\naction=delete&path=notes%2Fa.txt",
+        );
+        assert!(std::str::from_utf8(&removed).unwrap().contains("Location: ?path=notes"));
+        assert!(store.get("notes/a.txt").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn upload_request(folder: &str, name: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--bound\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\nupload\r\n");
+        body.extend_from_slice(b"--bound\r\nContent-Disposition: form-data; name=\"folder\"\r\n\r\n");
+        body.extend_from_slice(folder.as_bytes());
+        body.extend_from_slice(b"\r\n--bound\r\nContent-Disposition: form-data; name=\"file\"; filename=\"");
+        body.extend_from_slice(name.as_bytes());
+        body.extend_from_slice(b"\"\r\nContent-Type: application/octet-stream\r\n\r\n");
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n--bound--\r\n");
+        let mut req = format!(
+            "POST / HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=bound\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        req.extend_from_slice(&body);
+        req
     }
 }
