@@ -13,7 +13,7 @@ The steps are in [descriptions/action-plan.md](descriptions/action-plan.md).
 
 ## Run
 
-A local pNet node must already be listening. Approve both apps on the portal after the first start. Sign in and open **pDrive** (`/apps/drive/`).
+A local pNet node must already be listening. Approve both apps on the portal after the first start. Sign in and open **Drive** (`/apps/drive/`).
 
 ```bash
 cargo run --bin drive-server

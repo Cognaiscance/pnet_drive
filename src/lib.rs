@@ -18,4 +18,4 @@ pub const DEFAULT_CLIENT_PUSH: u16 = 8820;
 pub const DEFAULT_SERVER_PUSH: u16 = 8821;
 pub const DEFAULT_HTTP_PORT: u16 = 8822;
 pub const WEB_SLUG: &str = "drive";
-pub const WEB_TITLE: &str = "pDrive";
+pub const WEB_TITLE: &str = "Drive";
