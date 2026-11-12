@@ -204,6 +204,48 @@ impl Store {
         &self.trash
     }
 
+    /// Move a file into trash, or a folder and everything under it.
+    ///
+    /// Files under the folder become trash entries. The folder entries are
+    /// removed. Restoring a file creates any parent folder that is missing.
+    pub fn trash_path(&mut self, path: &str, now_ms: u64) -> Result<(), StoreError> {
+        match self.trash_file(path, now_ms) {
+            Err(StoreError::IsAFolder) => self.trash_folder(path, now_ms),
+            other => other,
+        }
+    }
+
+    fn trash_folder(&mut self, path: &str, now_ms: u64) -> Result<(), StoreError> {
+        let path = check_path(path)?;
+        let prefix = format!("{path}/");
+        let files: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.path.starts_with(&prefix) && matches!(entry.kind, Kind::File { .. }))
+            .map(|entry| entry.path.clone())
+            .collect();
+        let mut folders: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                (entry.path == path || entry.path.starts_with(&prefix))
+                    && matches!(entry.kind, Kind::Folder)
+            })
+            .map(|entry| entry.path.clone())
+            .collect();
+        if !folders.iter().any(|folder| folder == &path) {
+            return Err(StoreError::Missing);
+        }
+        for file in files {
+            self.trash_file(&file, now_ms)?;
+        }
+        folders.sort_by_key(|folder| std::cmp::Reverse(folder.len()));
+        for folder in folders {
+            self.remove_folder(&folder)?;
+        }
+        Ok(())
+    }
+
     pub fn trash_file(&mut self, path: &str, now_ms: u64) -> Result<(), StoreError> {
         let path = check_path(path)?;
         let Some(index) = self.entries.iter().position(|entry| entry.path == path) else {
@@ -237,7 +279,7 @@ impl Store {
         if self.entries.iter().any(|entry| entry.path == path) {
             return Err(StoreError::Taken);
         }
-        self.require_parent(&path)?;
+        self.ensure_parents(&path)?;
         let item = self.trash.remove(index);
         self.entries.push(Entry {
             path: item.path,
@@ -347,6 +389,19 @@ impl Store {
             )));
         }
         Ok(bytes)
+    }
+
+    fn ensure_parents(&mut self, path: &str) -> Result<(), StoreError> {
+        let Some((parent, _)) = path.rsplit_once('/') else {
+            return Ok(());
+        };
+        let parent = parent.to_string();
+        self.ensure_parents(&parent)?;
+        match self.entries.iter().find(|entry| entry.path == parent) {
+            Some(entry) if matches!(entry.kind, Kind::Folder) => Ok(()),
+            Some(_) => Err(StoreError::NotAFolder),
+            None => self.mkdir(&parent, &[0u8; 16]),
+        }
     }
 
     fn require_parent(&self, path: &str) -> Result<(), StoreError> {
@@ -792,6 +847,33 @@ mod tests {
         let again = Store::open(&dir).unwrap();
         assert!(again.trash().is_empty());
         assert_eq!(again.read_file("notes/copy.txt").unwrap(), b"hello");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_folder_trashes_the_files_inside() {
+        let dir = scratch();
+        let mut store = Store::open(&dir).unwrap();
+        let writer = [5u8; 16];
+        store.mkdir("notes", &writer).unwrap();
+        store.mkdir("notes/2026", &writer).unwrap();
+        store.put_file("notes/2026/a.txt", b"hello", &writer).unwrap();
+        store.trash_path("notes", 50).unwrap();
+        assert!(store.get("notes").unwrap().is_none());
+        assert!(store.get("notes/2026").unwrap().is_none());
+        assert_eq!(store.trash().len(), 1);
+        assert_eq!(store.trash()[0].path, "notes/2026/a.txt");
+        store.restore("notes/2026/a.txt").unwrap();
+        assert!(matches!(store.get("notes").unwrap().map(|e| &e.kind), Some(Kind::Folder)));
+        assert!(matches!(
+            store.get("notes/2026").unwrap().map(|e| &e.kind),
+            Some(Kind::Folder)
+        ));
+        assert_eq!(store.read_file("notes/2026/a.txt").unwrap(), b"hello");
+        store.mkdir("empty", &writer).unwrap();
+        store.trash_path("empty", 60).unwrap();
+        assert!(store.get("empty").unwrap().is_none());
+        assert_eq!(store.trash().len(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 }

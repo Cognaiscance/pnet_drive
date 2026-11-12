@@ -6,7 +6,7 @@ use crate::store::{self, Entry, Kind, Store, StoreError, TrashItem};
 
 const WEB_WRITER: [u8; 16] = [0u8; 16];
 
-pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
+pub fn render(entries: &[Entry], note: Option<&str>) -> String {
     let mut body = String::from(
         "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\"><head><meta charset=\"utf-8\">\
          <meta name=\"theme-color\" content=\"#070605\"><title>Drive</title>\n\
@@ -25,46 +25,19 @@ pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
     );
     body.push_str(PAGE_CSS);
     body.push_str("</style></head><body>\n<main>\n<header class=\"top\">\n");
-    body.push_str(&crumbs(folder));
+    body.push_str("<h1><a href=\"?raw=1\">Drive</a></h1>\n");
     body.push_str("<a class=\"nav\" href=\"?raw=1&amp;trash=1\">Trash</a>\n</header>\n");
     if let Some(note) = note {
         body.push_str("<p class=\"note\">");
         body.push_str(&esc(note));
         body.push_str("</p>\n");
     }
-    body.push_str(&forms(folder));
+    body.push_str(&forms(""));
     body.push_str("<section class=\"card\">\n");
     if entries.is_empty() {
         body.push_str("<p class=\"empty\">This folder is empty.</p>\n");
     } else {
-        body.push_str("<table><tbody>\n");
-        let mut ordered: Vec<&Entry> = entries.iter().filter(|e| matches!(e.kind, Kind::Folder)).collect();
-        ordered.extend(entries.iter().filter(|e| matches!(e.kind, Kind::File { .. })));
-        for entry in ordered {
-            body.push_str("<tr><td class=\"name\">");
-            match entry.kind {
-                Kind::Folder => {
-                    body.push_str("<a href=\"?raw=1&amp;path=");
-                    body.push_str(&url_enc(&entry.path));
-                    body.push_str("\">");
-                    body.push_str(&esc(entry.name()));
-                    body.push_str("</a></td><td class=\"size\"></td><td class=\"actions\"></td>");
-                }
-                Kind::File { size, .. } => {
-                    body.push_str("<a href=\"file?raw=1&amp;path=");
-                    body.push_str(&url_enc(&entry.path));
-                    body.push_str("\">");
-                    body.push_str(&esc(entry.name()));
-                    body.push_str("</a></td><td class=\"size\">");
-                    body.push_str(&format_size(size));
-                    body.push_str("</td><td class=\"actions\"><form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"delete\"><input type=\"hidden\" name=\"path\" value=\"");
-                    body.push_str(&esc(&entry.path));
-                    body.push_str("\"><button type=\"submit\">Delete</button></form></td>");
-                }
-            }
-            body.push_str("</tr>\n");
-        }
-        body.push_str("</tbody></table>\n");
+        render_tree(&mut body, entries, "");
     }
     body.push_str("</section>\n</main>\n");
     body.push_str(THEME_SYNC);
@@ -106,26 +79,72 @@ pub fn folder_query(request_line: &str) -> Result<Option<String>, ()> {
     Ok(Some(String::new()))
 }
 
-/// Links keep `raw=1`. Inside the portal frame, a query that drops it is the
-/// portal page again, so Drive and Trash would open a second header.
-fn crumbs(folder: &str) -> String {
-    let mut html = String::from("<h1><a href=\"?raw=1\">Drive</a>");
-    if !folder.is_empty() {
-        let mut built = String::new();
-        for part in folder.split('/') {
-            if !built.is_empty() {
-                built.push('/');
+const CONFIRM: &str = "onclick=\"event.stopPropagation(); return confirm('Are you sure?');\"";
+
+fn render_tree(body: &mut String, entries: &[Entry], parent: &str) {
+    let mut children: Vec<&Entry> = entries
+        .iter()
+        .filter(|entry| is_child(parent, &entry.path))
+        .collect();
+    children.sort_by(|a, b| {
+        let af = matches!(a.kind, Kind::Folder);
+        let bf = matches!(b.kind, Kind::Folder);
+        bf.cmp(&af).then_with(|| a.name().cmp(b.name()))
+    });
+    body.push_str("<ul class=\"tree\">\n");
+    for entry in children {
+        match entry.kind {
+            Kind::Folder => {
+                body.push_str("<li><details><summary><span class=\"twist\"></span><span class=\"name\">");
+                body.push_str(&esc(entry.name()));
+                body.push_str("</span>");
+                delete_form(body, &entry.path);
+                body.push_str("</summary>\n");
+                body.push_str(&forms(&entry.path));
+                if !entries.iter().any(|other| is_child(&entry.path, &other.path)) {
+                    body.push_str("<p class=\"empty\">This folder is empty.</p>\n");
+                } else {
+                    render_tree(body, entries, &entry.path);
+                }
+                body.push_str("</details></li>\n");
             }
-            built.push_str(part);
-            html.push_str(" / <a href=\"?raw=1&amp;path=");
-            html.push_str(&url_enc(&built));
-            html.push_str("\">");
-            html.push_str(&esc(part));
-            html.push_str("</a>");
+            Kind::File { size, .. } => {
+                body.push_str("<li class=\"file\"><a href=\"file?raw=1&amp;path=");
+                body.push_str(&url_enc(&entry.path));
+                body.push_str("\">");
+                body.push_str(&esc(entry.name()));
+                body.push_str("</a><span class=\"size\">");
+                body.push_str(&format_size(size));
+                body.push_str("</span>");
+                delete_form(body, &entry.path);
+                body.push_str("</li>\n");
+            }
         }
     }
-    html.push_str("</h1>\n");
-    html
+    body.push_str("</ul>\n");
+}
+
+fn delete_form(body: &mut String, path: &str) {
+    body.push_str("<form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"delete\"><input type=\"hidden\" name=\"path\" value=\"");
+    body.push_str(&esc(path));
+    body.push_str("\"><button type=\"submit\" ");
+    body.push_str(CONFIRM);
+    body.push_str(">Delete</button></form>");
+}
+
+fn is_child(folder: &str, path: &str) -> bool {
+    let rest = if folder.is_empty() {
+        path
+    } else {
+        let Some(rest) = path.strip_prefix(folder) else {
+            return false;
+        };
+        let Some(rest) = rest.strip_prefix('/') else {
+            return false;
+        };
+        rest
+    };
+    !rest.is_empty() && !rest.contains('/')
 }
 
 fn format_size(size: u64) -> String {
@@ -280,12 +299,20 @@ button.upload:hover { background: var(--gold-hover); color: var(--gold-ink); }
   padding: 0.4rem 1.2rem; box-shadow: var(--shadow); margin: 0;
 }
 .card .empty { margin: 0.8rem 0; }
-table { border-collapse: collapse; width: 100%; }
-td { padding: .45rem .4rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
-tr:last-child td { border-bottom: 0; }
-td.size { color: var(--muted); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-td.actions { text-align: right; white-space: nowrap; width: 1%; }
-td.actions form { display: inline; }
+ul.tree { list-style: none; margin: 0; padding: 0; }
+ul.tree ul { margin: 0 0 0.3rem 1.15rem; }
+.file, summary {
+  display: flex; align-items: center; gap: 0.7rem;
+  padding: 0.4rem 0; border-bottom: 1px solid var(--line);
+}
+summary { cursor: pointer; }
+summary::-webkit-details-marker { display: none; }
+.twist { width: 0.8rem; color: var(--muted); }
+.twist::before { content: "▸"; }
+details[open] > summary .twist::before { content: "▾"; }
+.name, .file a { flex: 1; }
+.size { color: var(--muted); font-variant-numeric: tabular-nums; }
+summary form, .file form { margin-left: auto; }
 "#;
 
 pub fn handle(store: &mut Store, raw: &[u8]) -> Vec<u8> {
@@ -317,7 +344,7 @@ pub fn handle(store: &mut Store, raw: &[u8]) -> Vec<u8> {
         Req::Delete { path } => {
             let _ = store.sweep(store::now_ms());
             let back = parent_folder(&path);
-            match store.trash_file(&path, store::now_ms()) {
+            match store.trash_path(&path, store::now_ms()) {
                 Ok(()) => redirect(&back),
                 Err(err) => list_page(store, &back, Some(&err.to_string())),
             }
@@ -389,16 +416,8 @@ fn redirect_trash() -> Vec<u8> {
     b"HTTP/1.1 303 See Other\r\nLocation: ?raw=1&trash=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
 }
 
-fn list_page(store: &Store, folder: &str, note: Option<&str>) -> Vec<u8> {
-    match store.list(folder) {
-        Ok(entries) => http_response(200, "OK", &render(folder, &entries, note)),
-        Err(StoreError::BadPath | StoreError::Missing | StoreError::NotAFolder) => http_response(
-            404,
-            "Not Found",
-            &render(folder, &[], Some("That folder is not in the drive.")),
-        ),
-        Err(err) => http_response(500, "Internal Server Error", &format!("<p>{}</p>", esc(&err.to_string()))),
-    }
+fn list_page(store: &Store, _folder: &str, note: Option<&str>) -> Vec<u8> {
+    http_response(200, "OK", &render(store.entries(), note))
 }
 
 fn forms(folder: &str) -> String {
@@ -646,7 +665,7 @@ mod tests {
 
     #[test]
     fn empty_folder_is_not_an_error() {
-        let html = render("", &[], None);
+        let html = render(&[], None);
         assert!(html.contains("This folder is empty."));
         assert!(html.contains("pnet-theme"));
         assert!(html.contains("data-theme=\"dark\""));
@@ -658,19 +677,25 @@ mod tests {
     #[test]
     fn subfolder_lists_only_its_entries() {
         let html = render(
-            "notes",
-            &[file("notes/a.txt", 5), folder("notes/2026")],
+            &[
+                file("notes/a.txt", 5),
+                folder("notes/2026"),
+                folder("notes"),
+            ],
             None,
         );
         assert!(html.contains("a.txt"));
         assert!(html.contains("2026"));
         assert!(html.contains("5 B"));
-        let folder_at = html.find("href=\"?raw=1&amp;path=notes%2F2026\"").unwrap();
+        assert!(html.contains("<details>"));
+        assert!(html.contains("Are you sure?"));
+        let folder_at = html.find("value=\"notes/2026\"").unwrap();
         let file_at = html.find("href=\"file?raw=1&amp;path=notes%2Fa.txt\"").unwrap();
-        assert!(folder_at < file_at);
+        let root_at = html.find("value=\"notes\"").unwrap();
+        assert!(root_at < folder_at && folder_at < file_at);
         assert!(html.contains("href=\"?raw=1&amp;trash=1\""));
         assert!(html.contains("class=\"card\""));
-        assert!(html.contains("button upload") || html.contains("class=\"upload\""));
+        assert!(html.contains("class=\"upload\""));
         assert!(html.contains("New folder"));
         assert!(html.contains("Upload"));
         assert!(html.contains("Delete"));
