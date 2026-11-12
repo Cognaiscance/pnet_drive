@@ -26,7 +26,7 @@ pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
     body.push_str(PAGE_CSS);
     body.push_str("</style></head><body>\n<main>\n<h1>Drive</h1>\n");
     body.push_str(&crumbs(folder));
-    body.push_str("<p class=\"crumbs\"><a href=\"?trash=1\">Trash</a></p>\n");
+    body.push_str("<p class=\"crumbs\"><a href=\"?raw=1&amp;trash=1\">Trash</a></p>\n");
     if let Some(note) = note {
         body.push_str("<p class=\"note\">");
         body.push_str(&esc(note));
@@ -41,14 +41,14 @@ pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
             body.push_str("<li>");
             match entry.kind {
                 Kind::Folder => {
-                    body.push_str("<a href=\"?path=");
+                    body.push_str("<a href=\"?raw=1&amp;path=");
                     body.push_str(&url_enc(&entry.path));
                     body.push_str("\">");
                     body.push_str(&esc(entry.name()));
                     body.push_str("</a>");
                 }
                 Kind::File { size, .. } => {
-                    body.push_str("<a href=\"file?path=");
+                    body.push_str("<a href=\"file?raw=1&amp;path=");
                     body.push_str(&url_enc(&entry.path));
                     body.push_str("\">");
                     body.push_str(&esc(entry.name()));
@@ -105,8 +105,10 @@ pub fn folder_query(request_line: &str) -> Result<Option<String>, ()> {
     Ok(Some(String::new()))
 }
 
+/// Links keep `raw=1`. Inside the portal frame, a query that drops it is the
+/// portal page again, so Drive and Trash would open a second header.
 fn crumbs(folder: &str) -> String {
-    let mut html = String::from("<p class=\"crumbs\"><a href=\"?\">Drive</a>");
+    let mut html = String::from("<p class=\"crumbs\"><a href=\"?raw=1\">Drive</a>");
     if !folder.is_empty() {
         let mut built = String::new();
         for part in folder.split('/') {
@@ -114,7 +116,7 @@ fn crumbs(folder: &str) -> String {
                 built.push('/');
             }
             built.push_str(part);
-            html.push_str(" / <a href=\"?path=");
+            html.push_str(" / <a href=\"?raw=1&amp;path=");
             html.push_str(&url_enc(&built));
             html.push_str("\">");
             html.push_str(&esc(part));
@@ -299,7 +301,7 @@ fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
          </script><style>",
     );
     body.push_str(PAGE_CSS);
-    body.push_str("</style></head><body><main>\n<h1>Trash</h1>\n<p class=\"crumbs\"><a href=\"?\">Drive</a></p>\n");
+    body.push_str("</style></head><body><main>\n<h1>Trash</h1>\n<p class=\"crumbs\"><a href=\"?raw=1\">Drive</a></p>\n");
     if let Some(note) = note {
         body.push_str("<p class=\"note\">");
         body.push_str(&esc(note));
@@ -325,7 +327,7 @@ fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
 }
 
 fn redirect_trash() -> Vec<u8> {
-    b"HTTP/1.1 303 See Other\r\nLocation: ?trash=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+    b"HTTP/1.1 303 See Other\r\nLocation: ?raw=1&trash=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
 }
 
 fn list_page(store: &Store, folder: &str, note: Option<&str>) -> Vec<u8> {
@@ -350,9 +352,9 @@ fn forms(folder: &str) -> String {
 
 fn redirect(folder: &str) -> Vec<u8> {
     let loc = if folder.is_empty() {
-        "?".to_string()
+        "?raw=1".to_string()
     } else {
-        format!("?path={}", url_enc(folder))
+        format!("?raw=1&path={}", url_enc(folder))
     };
     format!("HTTP/1.1 303 See Other\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
 }
@@ -601,8 +603,9 @@ mod tests {
         );
         assert!(html.contains("a.txt"));
         assert!(html.contains("2026"));
-        assert!(html.contains("href=\"?path=notes%2F2026\""));
-        assert!(html.contains("href=\"file?path=notes%2Fa.txt\""));
+        assert!(html.contains("href=\"?raw=1&amp;path=notes%2F2026\""));
+        assert!(html.contains("href=\"file?raw=1&amp;path=notes%2Fa.txt\""));
+        assert!(html.contains("href=\"?raw=1&amp;trash=1\""));
         assert!(html.contains("New folder"));
         assert!(html.contains("Upload"));
         assert!(html.contains("Delete"));
@@ -659,7 +662,7 @@ mod tests {
             &mut store,
             b"POST / HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 32\r\n\r\naction=delete&path=notes%2Fa.txt",
         );
-        assert!(std::str::from_utf8(&removed).unwrap().contains("Location: ?path=notes"));
+        assert!(std::str::from_utf8(&removed).unwrap().contains("Location: ?raw=1&path=notes"));
         assert!(store.get("notes/a.txt").unwrap().is_none());
         assert_eq!(store.trash()[0].path, "notes/a.txt");
 
@@ -672,7 +675,7 @@ mod tests {
             &mut store,
             b"POST / HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 33\r\n\r\naction=restore&path=notes%2Fa.txt",
         );
-        assert!(std::str::from_utf8(&restored).unwrap().contains("Location: ?trash=1"));
+        assert!(std::str::from_utf8(&restored).unwrap().contains("Location: ?raw=1&trash=1"));
         assert_eq!(store.read_file("notes/a.txt").unwrap(), body);
         assert!(store.trash().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
