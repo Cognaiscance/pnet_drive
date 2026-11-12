@@ -24,48 +24,49 @@ pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
          </script>\n<style>",
     );
     body.push_str(PAGE_CSS);
-    body.push_str("</style></head><body>\n<main>\n<h1>Drive</h1>\n");
+    body.push_str("</style></head><body>\n<main>\n<header class=\"top\">\n");
     body.push_str(&crumbs(folder));
-    body.push_str("<p class=\"crumbs\"><a href=\"?raw=1&amp;trash=1\">Trash</a></p>\n");
+    body.push_str("<a class=\"nav\" href=\"?raw=1&amp;trash=1\">Trash</a>\n</header>\n");
     if let Some(note) = note {
         body.push_str("<p class=\"note\">");
         body.push_str(&esc(note));
         body.push_str("</p>\n");
     }
     body.push_str(&forms(folder));
+    body.push_str("<section class=\"card\">\n");
     if entries.is_empty() {
         body.push_str("<p class=\"empty\">This folder is empty.</p>\n");
     } else {
-        body.push_str("<ul class=\"files\">\n");
-        for entry in entries {
-            body.push_str("<li>");
+        body.push_str("<table><tbody>\n");
+        let mut ordered: Vec<&Entry> = entries.iter().filter(|e| matches!(e.kind, Kind::Folder)).collect();
+        ordered.extend(entries.iter().filter(|e| matches!(e.kind, Kind::File { .. })));
+        for entry in ordered {
+            body.push_str("<tr><td class=\"name\">");
             match entry.kind {
                 Kind::Folder => {
                     body.push_str("<a href=\"?raw=1&amp;path=");
                     body.push_str(&url_enc(&entry.path));
                     body.push_str("\">");
                     body.push_str(&esc(entry.name()));
-                    body.push_str("</a>");
+                    body.push_str("</a></td><td class=\"size\"></td><td class=\"actions\"></td>");
                 }
                 Kind::File { size, .. } => {
                     body.push_str("<a href=\"file?raw=1&amp;path=");
                     body.push_str(&url_enc(&entry.path));
                     body.push_str("\">");
                     body.push_str(&esc(entry.name()));
-                    body.push_str("</a>");
-                    body.push_str(" <span class=\"size\">");
-                    body.push_str(&size.to_string());
-                    body.push_str(" bytes</span>");
-                    body.push_str("<form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"delete\"><input type=\"hidden\" name=\"path\" value=\"");
+                    body.push_str("</a></td><td class=\"size\">");
+                    body.push_str(&format_size(size));
+                    body.push_str("</td><td class=\"actions\"><form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"delete\"><input type=\"hidden\" name=\"path\" value=\"");
                     body.push_str(&esc(&entry.path));
-                    body.push_str("\"><button type=\"submit\">Delete</button></form>");
+                    body.push_str("\"><button type=\"submit\">Delete</button></form></td>");
                 }
             }
-            body.push_str("</li>\n");
+            body.push_str("</tr>\n");
         }
-        body.push_str("</ul>\n");
+        body.push_str("</tbody></table>\n");
     }
-    body.push_str("</main>\n");
+    body.push_str("</section>\n</main>\n");
     body.push_str(THEME_SYNC);
     body.push_str("</body></html>\n");
     body
@@ -108,7 +109,7 @@ pub fn folder_query(request_line: &str) -> Result<Option<String>, ()> {
 /// Links keep `raw=1`. Inside the portal frame, a query that drops it is the
 /// portal page again, so Drive and Trash would open a second header.
 fn crumbs(folder: &str) -> String {
-    let mut html = String::from("<p class=\"crumbs\"><a href=\"?raw=1\">Drive</a>");
+    let mut html = String::from("<h1><a href=\"?raw=1\">Drive</a>");
     if !folder.is_empty() {
         let mut built = String::new();
         for part in folder.split('/') {
@@ -123,8 +124,33 @@ fn crumbs(folder: &str) -> String {
             html.push_str("</a>");
         }
     }
-    html.push_str("</p>\n");
+    html.push_str("</h1>\n");
     html
+}
+
+fn format_size(size: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    if size < KB {
+        format!("{size} B")
+    } else if size < MB {
+        format_unit(size, KB, "KB")
+    } else if size < GB {
+        format_unit(size, MB, "MB")
+    } else {
+        format_unit(size, GB, "GB")
+    }
+}
+
+fn format_unit(size: u64, unit: u64, label: &str) -> String {
+    let whole = size / unit;
+    let frac = (size % unit) * 10 / unit;
+    if frac == 0 {
+        format!("{whole} {label}")
+    } else {
+        format!("{whole}.{frac} {label}")
+    }
 }
 
 fn esc(text: &str) -> String {
@@ -202,14 +228,18 @@ const PAGE_CSS: &str = r#"
 :root, html[data-theme="dark"] {
   color-scheme: dark;
   --bg: #070605; --bg-glow: #2a2218; --bg-elev: #14110d;
-  --ink: #f4efe6; --muted: #b7aa96; --gold: #d4b15a;
-  --line: rgba(244, 239, 230, 0.12);
+  --ink: #f4efe6; --muted: #b7aa96; --gold: #d4b15a; --gold-hover: #e4c56e;
+  --gold-ink: #1a1408; --line: rgba(244, 239, 230, 0.12);
+  --card-line: rgba(212, 177, 90, 0.32); --line-strong: rgba(212, 177, 90, 0.45);
+  --shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
 }
 html[data-theme="light"] {
   color-scheme: light;
   --bg: #f3eee4; --bg-glow: #f0e0be; --bg-elev: #fffdf8;
-  --ink: #241c14; --muted: #6b5844; --gold: #8d6818;
-  --line: rgba(36, 28, 20, 0.1);
+  --ink: #241c14; --muted: #6b5844; --gold: #8d6818; --gold-hover: #6f5010;
+  --gold-ink: #fffdf8; --line: rgba(36, 28, 20, 0.1);
+  --card-line: rgba(141, 104, 24, 0.28); --line-strong: rgba(141, 104, 24, 0.38);
+  --shadow: 0 12px 32px rgba(70, 48, 16, 0.08);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; }
@@ -219,19 +249,43 @@ body {
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   line-height: 1.5;
 }
-h1 { font-family: Georgia, "Iowan Old Style", Palatino, serif; font-weight: 600; margin: 0 0 0.6rem; }
-main { max-width: 40rem; margin: 0 auto; padding: 2rem 1.2rem 3rem; }
+h1 { font-family: Georgia, "Iowan Old Style", Palatino, serif; font-weight: 600; margin: 0; font-size: 1.6rem; }
+main { max-width: 56rem; margin: 0 auto; padding: 2rem 1.2rem 3rem; }
 a { color: var(--gold); text-decoration: none; }
 a:hover { text-decoration: underline; }
-.crumbs, .empty, .size, .note { color: var(--muted); }
-form { display: flex; gap: 0.5rem; align-items: center; margin: 0.6rem 0; }
-input, button {
-  font: inherit; color: var(--ink); background: var(--bg-elev);
-  border: 1px solid var(--line); border-radius: 8px; padding: 0.35rem 0.6rem;
+.top { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+a.nav {
+  color: var(--ink); border: 1px solid var(--line-strong); border-radius: 8px;
+  padding: .28rem .7rem; font-weight: 600; white-space: nowrap; text-decoration: none;
 }
-ul.files { list-style: none; padding: 0; margin: 1rem 0; }
-ul.files li { padding: 0.45rem 0; border-bottom: 1px solid var(--line); }
-ul.files form { display: inline; margin-left: 0.6rem; }
+a.nav:hover { color: var(--gold); border-color: var(--gold); }
+.note, .empty, .size { color: var(--muted); }
+.note { margin: 0.8rem 0 0; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 0.75rem 1.2rem; align-items: center; margin: 1rem 0; }
+form { display: flex; gap: 0.5rem; align-items: center; margin: 0; }
+input, button { font: inherit; }
+input {
+  color: var(--ink); background: var(--bg); border: 1px solid var(--line-strong);
+  border-radius: 8px; padding: .35rem .6rem;
+}
+button {
+  background: transparent; color: var(--ink); border: 1px solid var(--line-strong);
+  border-radius: 8px; font-weight: 600; padding: .28rem .7rem; cursor: pointer;
+}
+button:hover { color: var(--gold); border-color: var(--gold); }
+button.upload { background: var(--gold); color: var(--gold-ink); border: 0; }
+button.upload:hover { background: var(--gold-hover); color: var(--gold-ink); }
+.card {
+  background: var(--bg-elev); border: 1px solid var(--card-line); border-radius: 14px;
+  padding: 0.4rem 1.2rem; box-shadow: var(--shadow); margin: 0;
+}
+.card .empty { margin: 0.8rem 0; }
+table { border-collapse: collapse; width: 100%; }
+td { padding: .45rem .4rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+td.size { color: var(--muted); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.actions { text-align: right; white-space: nowrap; width: 1%; }
+td.actions form { display: inline; }
 "#;
 
 pub fn handle(store: &mut Store, raw: &[u8]) -> Vec<u8> {
@@ -301,26 +355,31 @@ fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
          </script><style>",
     );
     body.push_str(PAGE_CSS);
-    body.push_str("</style></head><body><main>\n<h1>Trash</h1>\n<p class=\"crumbs\"><a href=\"?raw=1\">Drive</a></p>\n");
+    body.push_str(
+        "</style></head><body><main>\n<header class=\"top\">\n<h1>Trash</h1>\n\
+         <a class=\"nav\" href=\"?raw=1\">Drive</a>\n</header>\n\
+         <p class=\"note\">Deleted files stay here for 2 days.</p>\n",
+    );
     if let Some(note) = note {
         body.push_str("<p class=\"note\">");
         body.push_str(&esc(note));
         body.push_str("</p>\n");
     }
+    body.push_str("<section class=\"card\">\n");
     if items.is_empty() {
         body.push_str("<p class=\"empty\">Trash is empty.</p>\n");
     } else {
-        body.push_str("<ul class=\"files\">\n");
+        body.push_str("<table><tbody>\n");
         for item in items {
-            body.push_str("<li>");
+            body.push_str("<tr><td class=\"name\">");
             body.push_str(&esc(&item.path));
-            body.push_str("<form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"restore\"><input type=\"hidden\" name=\"path\" value=\"");
+            body.push_str("</td><td class=\"actions\"><form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"restore\"><input type=\"hidden\" name=\"path\" value=\"");
             body.push_str(&esc(&item.path));
-            body.push_str("\"><button type=\"submit\">Restore</button></form></li>\n");
+            body.push_str("\"><button type=\"submit\">Restore</button></form></td></tr>\n");
         }
-        body.push_str("</ul>\n");
+        body.push_str("</tbody></table>\n");
     }
-    body.push_str("<p class=\"empty\">Deleted files stay here for 2 days.</p>\n</main>\n");
+    body.push_str("</section>\n</main>\n");
     body.push_str(THEME_SYNC);
     body.push_str("</body></html>\n");
     body
@@ -345,8 +404,10 @@ fn list_page(store: &Store, folder: &str, note: Option<&str>) -> Vec<u8> {
 fn forms(folder: &str) -> String {
     let folder = esc(folder);
     format!(
-        "<form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"mkdir\"><input type=\"hidden\" name=\"folder\" value=\"{folder}\"><input name=\"name\" required placeholder=\"Folder name\"><button type=\"submit\">New folder</button></form>\n\
-         <form method=\"post\" enctype=\"multipart/form-data\"><input type=\"hidden\" name=\"action\" value=\"upload\"><input type=\"hidden\" name=\"folder\" value=\"{folder}\"><input type=\"file\" name=\"file\" required><button type=\"submit\">Upload</button></form>\n"
+        "<div class=\"toolbar\">\
+         <form method=\"post\"><input type=\"hidden\" name=\"action\" value=\"mkdir\"><input type=\"hidden\" name=\"folder\" value=\"{folder}\"><input name=\"name\" required placeholder=\"Folder name\"><button type=\"submit\">New folder</button></form>\
+         <form method=\"post\" enctype=\"multipart/form-data\"><input type=\"hidden\" name=\"action\" value=\"upload\"><input type=\"hidden\" name=\"folder\" value=\"{folder}\"><input type=\"file\" name=\"file\" required><button class=\"upload\" type=\"submit\">Upload</button></form>\
+         </div>\n"
     )
 }
 
@@ -598,14 +659,18 @@ mod tests {
     fn subfolder_lists_only_its_entries() {
         let html = render(
             "notes",
-            &[folder("notes/2026"), file("notes/a.txt", 5)],
+            &[file("notes/a.txt", 5), folder("notes/2026")],
             None,
         );
         assert!(html.contains("a.txt"));
         assert!(html.contains("2026"));
-        assert!(html.contains("href=\"?raw=1&amp;path=notes%2F2026\""));
-        assert!(html.contains("href=\"file?raw=1&amp;path=notes%2Fa.txt\""));
+        assert!(html.contains("5 B"));
+        let folder_at = html.find("href=\"?raw=1&amp;path=notes%2F2026\"").unwrap();
+        let file_at = html.find("href=\"file?raw=1&amp;path=notes%2Fa.txt\"").unwrap();
+        assert!(folder_at < file_at);
         assert!(html.contains("href=\"?raw=1&amp;trash=1\""));
+        assert!(html.contains("class=\"card\""));
+        assert!(html.contains("button upload") || html.contains("class=\"upload\""));
         assert!(html.contains("New folder"));
         assert!(html.contains("Upload"));
         assert!(html.contains("Delete"));
