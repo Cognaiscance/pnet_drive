@@ -65,7 +65,9 @@ pub fn render(folder: &str, entries: &[Entry], note: Option<&str>) -> String {
         }
         body.push_str("</ul>\n");
     }
-    body.push_str("</main></body></html>\n");
+    body.push_str("</main>\n");
+    body.push_str(THEME_SYNC);
+    body.push_str("</body></html>\n");
     body
 }
 
@@ -178,6 +180,22 @@ fn from_hex(byte: u8) -> Option<u8> {
     }
 }
 
+/// Repaint when the portal top bar writes `pnet-theme` in another document.
+const THEME_SYNC: &str = r##"<script>
+(function () {
+  var key = "pnet-theme";
+  function paint(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", theme === "light" ? "#f3eee4" : "#070605");
+  }
+  window.addEventListener("storage", function (ev) {
+    if (ev.key === key && (ev.newValue === "light" || ev.newValue === "dark")) paint(ev.newValue);
+  });
+})();
+</script>
+"##;
+
 const PAGE_CSS: &str = r#"
 :root, html[data-theme="dark"] {
   color-scheme: dark;
@@ -275,6 +293,8 @@ fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
              if (saved === \"light\" || saved === \"dark\") theme = saved;\
            } catch (e) {}\
            document.documentElement.setAttribute(\"data-theme\", theme);\
+           var meta = document.querySelector('meta[name=\"theme-color\"]');\
+           if (meta) meta.setAttribute(\"content\", theme === \"light\" ? \"#f3eee4\" : \"#070605\");\
          })();\
          </script><style>",
     );
@@ -298,7 +318,9 @@ fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
         }
         body.push_str("</ul>\n");
     }
-    body.push_str("<p class=\"empty\">Deleted files stay here for 2 days.</p>\n</main></body></html>\n");
+    body.push_str("<p class=\"empty\">Deleted files stay here for 2 days.</p>\n</main>\n");
+    body.push_str(THEME_SYNC);
+    body.push_str("</body></html>\n");
     body
 }
 
@@ -563,6 +585,10 @@ mod tests {
     fn empty_folder_is_not_an_error() {
         let html = render("", &[], None);
         assert!(html.contains("This folder is empty."));
+        assert!(html.contains("pnet-theme"));
+        assert!(html.contains("data-theme=\"dark\""));
+        assert!(html.contains("html[data-theme=\"light\"]"));
+        assert!(!html.contains("theme-toggle"));
         assert!(!html.to_ascii_lowercase().contains("error"));
     }
 
