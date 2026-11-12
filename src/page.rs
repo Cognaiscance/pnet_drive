@@ -7,11 +7,39 @@ use crate::store::{self, Entry, Kind, Store, StoreError, TrashItem};
 const WEB_WRITER: [u8; 16] = [0u8; 16];
 
 pub fn render(entries: &[Entry], note: Option<&str>) -> String {
+    document("Drive", &drive_inner(entries, note))
+}
+
+fn drive_inner(entries: &[Entry], note: Option<&str>) -> String {
+    let mut body = String::from(
+        "<header class=\"top\">\n<h1><a class=\"nav\" href=\"?raw=1\">Drive</a></h1>\n\
+         <a class=\"nav\" href=\"?raw=1&amp;trash=1\">Trash</a>\n</header>\n",
+    );
+    if let Some(note) = note {
+        body.push_str("<p class=\"note\">");
+        body.push_str(&esc(note));
+        body.push_str("</p>\n");
+    }
+    body.push_str(&forms(""));
+    body.push_str("<section class=\"card\" id=\"drive-list\">\n");
+    if entries.is_empty() {
+        body.push_str("<p class=\"empty\">This folder is empty.</p>\n");
+    } else {
+        render_tree(&mut body, entries, "");
+    }
+    body.push_str("</section>\n");
+    body
+}
+
+fn document(title: &str, inner: &str) -> String {
     let mut body = String::from(
         "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\"><head><meta charset=\"utf-8\">\
-         <meta name=\"theme-color\" content=\"#070605\"><title>Drive</title>\n\
-         <script>\
-         (function () {\
+         <meta name=\"theme-color\" content=\"#070605\"><title>",
+    );
+    body.push_str(title);
+    body.push_str("</title>\n<script>");
+    body.push_str(
+        "(function () {\
            var theme = \"dark\";\
            try {\
              var saved = localStorage.getItem(\"pnet-theme\");\
@@ -20,26 +48,14 @@ pub fn render(entries: &[Entry], note: Option<&str>) -> String {
            document.documentElement.setAttribute(\"data-theme\", theme);\
            var meta = document.querySelector('meta[name=\"theme-color\"]');\
            if (meta) meta.setAttribute(\"content\", theme === \"light\" ? \"#f3eee4\" : \"#070605\");\
-         })();\
-         </script>\n<style>",
+         })();",
     );
+    body.push_str("</script>\n<style>");
     body.push_str(PAGE_CSS);
-    body.push_str("</style></head><body>\n<main>\n<header class=\"top\">\n");
-    body.push_str("<h1><a href=\"?raw=1\">Drive</a></h1>\n");
-    body.push_str("<a class=\"nav\" href=\"?raw=1&amp;trash=1\">Trash</a>\n</header>\n");
-    if let Some(note) = note {
-        body.push_str("<p class=\"note\">");
-        body.push_str(&esc(note));
-        body.push_str("</p>\n");
-    }
-    body.push_str(&forms(""));
-    body.push_str("<section class=\"card\">\n");
-    if entries.is_empty() {
-        body.push_str("<p class=\"empty\">This folder is empty.</p>\n");
-    } else {
-        render_tree(&mut body, entries, "");
-    }
-    body.push_str("</section>\n</main>\n");
+    body.push_str("</style></head><body>\n<main>\n");
+    body.push_str(inner);
+    body.push_str("</main>\n");
+    body.push_str(PAGE_BEHAVIOR);
     body.push_str(THEME_SYNC);
     body.push_str("</body></html>\n");
     body
@@ -95,7 +111,9 @@ fn render_tree(body: &mut String, entries: &[Entry], parent: &str) {
     for entry in children {
         match entry.kind {
             Kind::Folder => {
-                body.push_str("<li><details><summary><span class=\"twist\"></span><span class=\"name\">");
+                body.push_str("<li><details data-path=\"");
+                body.push_str(&esc(&entry.path));
+                body.push_str("\"><summary><span class=\"twist\"></span><span class=\"name\">");
                 body.push_str(&esc(entry.name()));
                 body.push_str("</span>");
                 delete_form(body, &entry.path);
@@ -228,6 +246,59 @@ fn from_hex(byte: u8) -> Option<u8> {
 }
 
 /// Repaint when the portal top bar writes `pnet-theme` in another document.
+const PAGE_BEHAVIOR: &str = r##"<script>
+(function () {
+  function openPaths() {
+    var paths = [];
+    document.querySelectorAll("details[open][data-path]").forEach(function (el) {
+      paths.push(el.getAttribute("data-path"));
+    });
+    return paths;
+  }
+  function reopen(paths) {
+    paths.forEach(function (path) {
+      var sel = 'details[data-path="' + path.replace(/"/g, "") + '"]';
+      var el = document.querySelector(sel);
+      if (el) el.open = true;
+    });
+  }
+  function paint(html, paths) {
+    var main = document.querySelector("main");
+    if (!main) return;
+    main.innerHTML = html;
+    reopen(paths);
+  }
+  document.addEventListener("click", function (ev) {
+    var link = ev.target.closest ? ev.target.closest("a.nav") : null;
+    if (!link) return;
+    ev.preventDefault();
+    var url = link.getAttribute("href") || "?raw=1";
+    var join = url.indexOf("?") >= 0 ? "&" : "?";
+    fetch(url + join + "partial=1").then(function (res) {
+      return res.text();
+    }).then(function (html) {
+      paint(html, []);
+    });
+  });
+  document.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (!form || form.tagName !== "FORM") return;
+    ev.preventDefault();
+    var paths = openPaths();
+    var folder = form.querySelector('input[name="folder"]');
+    if (folder && folder.value) paths.push(folder.value);
+    var action = form.getAttribute("action") || "?raw=1";
+    var join = action.indexOf("?") >= 0 ? "&" : "?";
+    fetch(action + join + "partial=1", { method: "POST", body: new FormData(form) }).then(function (res) {
+      return res.text();
+    }).then(function (html) {
+      paint(html, paths);
+    });
+  });
+})();
+</script>
+"##;
+
 const THEME_SYNC: &str = r##"<script>
 (function () {
   var key = "pnet-theme";
@@ -316,20 +387,22 @@ summary form, .file form { margin-left: auto; }
 "#;
 
 pub fn handle(store: &mut Store, raw: &[u8]) -> Vec<u8> {
+    let partial = wants_partial(raw);
     let Some(req) = parse_request(raw) else {
         return http_response(400, "Bad Request", "<p>Bad request.</p>");
     };
     match req {
-        Req::List { folder } => list_page(store, &folder, None),
+        Req::List { folder } => list_page(store, &folder, None, partial),
         Req::Download { path } => match store.read_file(&path) {
             Ok(bytes) => file_response(&path, &bytes),
-            Err(_) => list_page(store, "", Some("That file is not in the drive.")),
+            Err(_) => list_page(store, "", Some("That file is not in the drive."), false),
         },
         Req::Mkdir { folder, name } => {
             let back = folder.clone();
             match child_path(&folder, &name).and_then(|path| store.mkdir(&path, &WEB_WRITER)) {
+                Ok(()) if partial => list_page(store, &back, None, true),
                 Ok(()) => redirect(&back),
-                Err(err) => list_page(store, &back, Some(&err.to_string())),
+                Err(err) => list_page(store, &back, Some(&err.to_string()), partial),
             }
         }
         Req::Upload { folder, name, bytes } => {
@@ -337,53 +410,61 @@ pub fn handle(store: &mut Store, raw: &[u8]) -> Vec<u8> {
             match child_path(&folder, &name)
                 .and_then(|path| store.put_file(&path, &bytes, &WEB_WRITER).map(|_| ()))
             {
+                Ok(()) if partial => list_page(store, &back, None, true),
                 Ok(()) => redirect(&back),
-                Err(err) => list_page(store, &back, Some(&err.to_string())),
+                Err(err) => list_page(store, &back, Some(&err.to_string()), partial),
             }
         }
         Req::Delete { path } => {
             let _ = store.sweep(store::now_ms());
             let back = parent_folder(&path);
             match store.trash_path(&path, store::now_ms()) {
+                Ok(()) if partial => list_page(store, &back, None, true),
                 Ok(()) => redirect(&back),
-                Err(err) => list_page(store, &back, Some(&err.to_string())),
+                Err(err) => list_page(store, &back, Some(&err.to_string()), partial),
             }
         }
-        Req::Trash => trash_page(store, None),
+        Req::Trash => trash_page(store, None, partial),
         Req::Restore { path } => {
             let _ = store.sweep(store::now_ms());
             match store.restore(&path) {
+                Ok(()) if partial => trash_page(store, None, true),
                 Ok(()) => redirect_trash(),
-                Err(err) => trash_page(store, Some(&err.to_string())),
+                Err(err) => trash_page(store, Some(&err.to_string()), partial),
             }
         }
     }
 }
 
-fn trash_page(store: &Store, note: Option<&str>) -> Vec<u8> {
-    http_response(200, "OK", &render_trash(store.trash(), note))
+fn wants_partial(raw: &[u8]) -> bool {
+    let Some(line_end) = raw.windows(2).position(|w| w == b"\r\n") else {
+        return false;
+    };
+    let Ok(line) = std::str::from_utf8(&raw[..line_end]) else {
+        return false;
+    };
+    let Some(target) = line.split_whitespace().nth(1) else {
+        return false;
+    };
+    let Some((_, query)) = target.split_once('?') else {
+        return false;
+    };
+    query.split('&').any(|part| part == "partial=1")
 }
 
-fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
+fn trash_page(store: &Store, note: Option<&str>, partial: bool) -> Vec<u8> {
+    let inner = trash_inner(store.trash(), note);
+    let html = if partial {
+        inner
+    } else {
+        document("Trash", &inner)
+    };
+    http_response(200, "OK", &html)
+}
+
+fn trash_inner(items: &[TrashItem], note: Option<&str>) -> String {
     let mut body = String::from(
-        "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\"><head><meta charset=\"utf-8\">\
-         <meta name=\"theme-color\" content=\"#070605\"><title>Trash</title>\n\
-         <script>\
-         (function () {\
-           var theme = \"dark\";\
-           try {\
-             var saved = localStorage.getItem(\"pnet-theme\");\
-             if (saved === \"light\" || saved === \"dark\") theme = saved;\
-           } catch (e) {}\
-           document.documentElement.setAttribute(\"data-theme\", theme);\
-           var meta = document.querySelector('meta[name=\"theme-color\"]');\
-           if (meta) meta.setAttribute(\"content\", theme === \"light\" ? \"#f3eee4\" : \"#070605\");\
-         })();\
-         </script><style>",
-    );
-    body.push_str(PAGE_CSS);
-    body.push_str(
-        "</style></head><body><main>\n<header class=\"top\">\n<h1>Trash</h1>\n\
+        "<header class=\"top\">\n<h1>Trash</h1>\n\
          <a class=\"nav\" href=\"?raw=1\">Drive</a>\n</header>\n\
          <p class=\"note\">Deleted files stay here for 2 days.</p>\n",
     );
@@ -406,9 +487,7 @@ fn render_trash(items: &[TrashItem], note: Option<&str>) -> String {
         }
         body.push_str("</tbody></table>\n");
     }
-    body.push_str("</section>\n</main>\n");
-    body.push_str(THEME_SYNC);
-    body.push_str("</body></html>\n");
+    body.push_str("</section>\n");
     body
 }
 
@@ -416,8 +495,10 @@ fn redirect_trash() -> Vec<u8> {
     b"HTTP/1.1 303 See Other\r\nLocation: ?raw=1&trash=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
 }
 
-fn list_page(store: &Store, _folder: &str, note: Option<&str>) -> Vec<u8> {
-    http_response(200, "OK", &render(store.entries(), note))
+fn list_page(store: &Store, _folder: &str, note: Option<&str>, partial: bool) -> Vec<u8> {
+    let inner = drive_inner(store.entries(), note);
+    let html = if partial { inner } else { document("Drive", &inner) };
+    http_response(200, "OK", &html)
 }
 
 fn forms(folder: &str) -> String {
@@ -687,7 +768,7 @@ mod tests {
         assert!(html.contains("a.txt"));
         assert!(html.contains("2026"));
         assert!(html.contains("5 B"));
-        assert!(html.contains("<details>"));
+        assert!(html.contains("<details "));
         assert!(html.contains("Are you sure?"));
         let folder_at = html.find("value=\"notes/2026\"").unwrap();
         let file_at = html.find("href=\"file?raw=1&amp;path=notes%2Fa.txt\"").unwrap();
@@ -696,6 +777,8 @@ mod tests {
         assert!(html.contains("href=\"?raw=1&amp;trash=1\""));
         assert!(html.contains("class=\"card\""));
         assert!(html.contains("class=\"upload\""));
+        assert!(html.contains("partial=1"));
+        assert!(html.contains("data-path=\"notes\""));
         assert!(html.contains("New folder"));
         assert!(html.contains("Upload"));
         assert!(html.contains("Delete"));
@@ -768,6 +851,30 @@ mod tests {
         assert!(std::str::from_utf8(&restored).unwrap().contains("Location: ?raw=1&trash=1"));
         assert_eq!(store.read_file("notes/a.txt").unwrap(), body);
         assert!(store.trash().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_partial_change_returns_the_list_without_a_new_document() {
+        let dir = std::env::temp_dir().join(format!(
+            "pnet-drive-partial-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::open(&dir).unwrap();
+        let made = handle(
+            &mut store,
+            b"POST /?raw=1&partial=1 HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 33\r\n\r\naction=mkdir&folder=&name=folder1",
+        );
+        let text = String::from_utf8_lossy(&made);
+        assert!(text.starts_with("HTTP/1.1 200"));
+        assert!(text.contains("folder1"));
+        assert!(!text.contains("<!DOCTYPE"));
+        let trash = handle(&mut store, b"GET /?raw=1&trash=1&partial=1 HTTP/1.1\r\n\r\n");
+        let trash = String::from_utf8_lossy(&trash);
+        assert!(trash.contains("<h1>Trash</h1>"));
+        assert!(trash.contains("href=\"?raw=1\">Drive"));
+        assert!(!trash.contains("<!DOCTYPE"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
