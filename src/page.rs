@@ -586,16 +586,28 @@ fn parse_post(content_type: &str, body: &[u8]) -> Option<Req> {
             .find(|f| f.name == "folder")
             .map(|f| f.text())
             .unwrap_or_default();
-        if action == "upload" {
-            let file = fields.iter().find(|f| f.name == "file")?;
-            let name = file.filename.clone()?;
-            return Some(Req::Upload {
+        return match action.as_str() {
+            "upload" => {
+                let file = fields.iter().find(|f| f.name == "file")?;
+                let name = file.filename.clone()?;
+                Some(Req::Upload {
+                    folder,
+                    name,
+                    bytes: file.bytes.clone(),
+                })
+            }
+            "mkdir" => Some(Req::Mkdir {
                 folder,
-                name,
-                bytes: file.bytes.clone(),
-            });
-        }
-        return None;
+                name: field_text(&fields, "name")?,
+            }),
+            "delete" => Some(Req::Delete {
+                path: field_text(&fields, "path")?,
+            }),
+            "restore" => Some(Req::Restore {
+                path: field_text(&fields, "path")?,
+            }),
+            _ => None,
+        };
     }
     let text = std::str::from_utf8(body).ok()?;
     let action = form_value(text, "action")?;
@@ -612,6 +624,10 @@ fn parse_post(content_type: &str, body: &[u8]) -> Option<Req> {
         }),
         _ => None,
     }
+}
+
+fn field_text(fields: &[Field], name: &str) -> Option<String> {
+    Some(fields.iter().find(|field| field.name == name)?.text())
 }
 
 struct Field {
@@ -875,6 +891,28 @@ mod tests {
         assert!(trash.contains("<h1>Trash</h1>"));
         assert!(trash.contains("href=\"?raw=1\">Drive"));
         assert!(!trash.contains("<!DOCTYPE"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_multipart_restore_is_not_a_bad_request() {
+        let dir = std::env::temp_dir().join(format!("pnet-drive-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::open(&dir).unwrap();
+        store.put_file("a.txt", b"hello", &[0u8; 16]).unwrap();
+        store.trash_path("a.txt", store::now_ms()).unwrap();
+        let body = b"--bound\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\nrestore\r\n--bound\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\na.txt\r\n--bound--\r\n";
+        let mut req = format!(
+            "POST /?raw=1&partial=1 HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=bound\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        req.extend_from_slice(body);
+        let restored = handle(&mut store, &req);
+        let text = String::from_utf8_lossy(&restored);
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        assert!(!text.contains("Bad request"), "{text}");
+        assert_eq!(store.read_file("a.txt").unwrap(), b"hello");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
